@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sensor ESP32</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 16px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  #status { font-size: .85rem; color: #f66; margin-bottom: 16px; }
+  #status.ok { color: #6d6; }
+  .cartao { background: #1c1c1c; border-radius: 10px; padding: 12px; margin-bottom: 16px; }
+  .valor { font-size: 2.4rem; font-weight: bold; }
+  canvas { width: 100%; height: 180px; display: block; }
+</style>
+</head>
+<body>
+  <h1>Sensor de temperatura e umidade</h1>
+  <div id="status">Conectando ao broker MQTT...</div>
+
+  <div class="cartao">
+    Temperatura <div class="valor" id="valorTemperatura" style="color:#ff7b54">--.- °C</div>
+    <canvas id="graficoTemperatura"></canvas>
+  </div>
+
+  <div class="cartao">
+    Umidade <div class="valor" id="valorUmidade" style="color:#4fc3f7">-- %</div>
+    <canvas id="graficoUmidade"></canvas>
+  </div>
+
+<script src="mqtt.min.js"></script>
+<script>
+const MAX_PONTOS = 60; // últimas 60 leituras (2 min com leitura a cada 2 s)
+const historicoTemperatura = [];
+const historicoUmidade = [];
+
+// Desenha um gráfico de linha simples num <canvas>
+function desenharGrafico(canvas, dados, cor, unidade) {
+  const largura = canvas.width = canvas.clientWidth * devicePixelRatio;
+  const altura = canvas.height = canvas.clientHeight * devicePixelRatio;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, largura, altura);
+  if (dados.length < 2) return;
+
+  let minimo = Math.min(...dados), maximo = Math.max(...dados);
+  if (maximo - minimo < 2) { minimo -= 1; maximo += 1; }
+  const margem = 40 * devicePixelRatio;
+  const x = i => margem + i * (largura - margem) / (MAX_PONTOS - 1);
+  const y = v => altura - 10 - (v - minimo) * (altura - 20) / (maximo - minimo);
+
+  ctx.fillStyle = '#888';
+  ctx.font = `${11 * devicePixelRatio}px sans-serif`;
+  ctx.fillText(maximo.toFixed(1) + unidade, 0, y(maximo) + 4);
+  ctx.fillText(minimo.toFixed(1) + unidade, 0, y(minimo));
+
+  ctx.strokeStyle = cor;
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.beginPath();
+  dados.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)));
+  ctx.stroke();
+}
+
+function adicionarPonto(historico, valor) {
+  historico.push(valor);
+  if (historico.length > MAX_PONTOS) historico.shift();
+}
+
+// Conecta no broker MQTT que roda no próprio ESP32 (porta 8080, WebSocket)
+const status = document.getElementById('status');
+const cliente = mqtt.connect(`ws://${location.hostname}:8080/`);
+
+cliente.on('connect', () => {
+  status.textContent = 'Conectado ao broker MQTT do ESP32';
+  status.className = 'ok';
+  cliente.subscribe(['sensor/temperatura', 'sensor/umidade']);
+});
+cliente.on('close', () => { status.textContent = 'Desconectado — tentando reconectar...'; status.className = ''; });
+
+cliente.on('message', (topico, mensagem) => {
+  const valor = parseFloat(mensagem.toString());
+  if (topico === 'sensor/temperatura') {
+    document.getElementById('valorTemperatura').textContent = valor.toFixed(1) + ' °C';
+    adicionarPonto(historicoTemperatura, valor);
+    desenharGrafico(document.getElementById('graficoTemperatura'), historicoTemperatura, '#ff7b54', '°');
+  } else if (topico === 'sensor/umidade') {
+    document.getElementById('valorUmidade').textContent = valor.toFixed(0) + ' %';
+    adicionarPonto(historicoUmidade, valor);
+    desenharGrafico(document.getElementById('graficoUmidade'), historicoUmidade, '#4fc3f7', '%');
+  }
+});
+</script>
+</body>
+</html>
