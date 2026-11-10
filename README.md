@@ -1,20 +1,22 @@
-# Monitoramento de Clima Interno com ESP32
+# Monitoramento de Clima Interno com ESP32 e Display OLED
 
-Projeto completo de Internet das Coisas (IoT) para monitoramento de temperatura e umidade em tempo real, integrando microcontrolador **ESP32**, sensor **DHT11**, display **OLED I2C (SSD1306)**, comunicação via **MQTT** e interface web com persistência em banco de dados **SQLite**.
+Projeto de IoT simplificado, limpo e direto ao ponto para leitura de **temperatura e umidade** em tempo real utilizando microcontrolador **ESP32**, sensor **DHT11** e **Display OLED I2C (SSD1306)**.
+
+O firmware é autônomo, não depende de conexões de rede externas ou brokers MQTT, focando em máxima estabilidade, legibilidade de código e velocidade de inicialização.
 
 ---
 
 ## 🛠️ Hardware e Pinagem
 
-| Componente | Pino do Componente | Pino do ESP32 | Observação |
+| Componente | Pino do Componente | Pino do ESP32 | Descrição |
 | :--- | :--- | :--- | :--- |
-| **Sensor DHT11** | Dados (DATA / OUT) | **GPIO 13** | Sinal digital |
+| **Sensor DHT11** | Dados (DATA / OUT) | **GPIO 13** | Sinal digital de leitura |
 | | VCC | 3.3V ou 5V | Alimentação |
-| | GND | GND | Terra comum |
-| **Display OLED 0.96"** | **SDA** | **GPIO 21** | Barramento I2C |
-| *(SSD1306 / 128x64)* | **SCL / SCK** | **GPIO 22** | Barramento I2C |
+| | GND | GND | Terra |
+| **Display OLED 0.96"** | **SDA** | **GPIO 21** | Dados I2C |
+| *(SSD1306 / 128x64)* | **SCL / SCK** | **GPIO 22** | Clock I2C |
 | | VCC | 3.3V | Alimentação |
-| | GND | GND | Terra comum |
+| | GND | GND | Terra |
 
 > **Endereço I2C do display:** `0x3C`
 
@@ -22,66 +24,41 @@ Projeto completo de Internet das Coisas (IoT) para monitoramento de temperatura 
 
 ## 🖥️ Layout do Display OLED
 
-O display OLED de 128x64 pixels exibe as informações formatadas no layout:
+As medições são atualizadas a cada 1 segundo no display de 128x64 pixels:
 
 ```text
 +------------------------------+
 |        CLIMA INTERNO         |
 |------------------------------|
-| Temp:   22.6 C               |
+| Temp:   23.8 C               |
 |------------------------------|
-| Umid:   44 %                 |
+| Umid:   40 %                 |
 +------------------------------+
 ```
 
 ---
 
-## 📁 Estrutura do Projeto
+## 📁 Estrutura do Repositório
 
-* **`src/main.cpp`**: Código-fonte C++ embarcado do ESP32:
-  * Leitura do sensor DHT11 a cada 1 segundo.
-  * Atualização da tela OLED em tempo real.
-  * Broker MQTT embarcado (`PicoMQTT` na porta TCP `1883` e WebSocket `8080`).
-  * Servidor web HTTP na porta `80` para servir os arquivos do LittleFS.
-  * Ponto de acesso Wi-Fi de contingência (`ESP32-Sensor` / senha `12345678`).
-* **`include/credenciais.h`**: Configuração do SSID e senha da sua rede Wi-Fi local.
-* **`data/`**: Interface Web responsiva com gráficos em tempo real (`index.html` e biblioteca `mqtt.min.js`).
-* **`backend/`**: Servidor Python (`app.py`) com banco de dados SQLite (`dados.db`) para armazenamento e histórico por períodos (tempo real, dia, semana, mês).
-* **`mqtt/`**: Arquivos de configuração e `docker-compose.yml` para execução de broker Eclipse Mosquitto externo (opcional).
+* **`src/main.cpp`**: Código C++ do firmware:
+  * Leitura e validação do sensor DHT11.
+  * Formatação e atualização direta da tela OLED.
+  * Código 100% em português, limpo e sem dependências desnecessárias.
+* **`platformio.ini`**: Configuração do projeto PlatformIO com as bibliotecas essenciais (`Adafruit SSD1306`, `Adafruit GFX` e `DHT sensor library`).
+* **`data/`**: Interface web complementar (HTML/JS com gráficos).
+* **`backend/`**: Servidor complementar em Python com SQLite para histórico e telemetria via API.
+* **`mqtt/`**: Configuração Docker Compose com Mosquitto MQTT.
 
 ---
 
-## 📡 Tópicos MQTT
+## 🚀 Como Compilar e Gravar
 
-| Tópico | Descrição | Exemplo de Carga |
-| :--- | :--- | :--- |
-| `sensor/temperatura` | Leitura da temperatura em graus Celsius | `24.5` |
-| `sensor/umidade` | Leitura da umidade relativa do ar (%) | `42` |
-
----
-
-## 🚀 Como Executar
-
-### 1. Gravar o ESP32 (Firmware e Sistema de Arquivos)
-
-1. Ajuste suas credenciais de Wi-Fi no arquivo `include/credenciais.h`.
-2. Compile e faça o upload do firmware:
+1. Conecte o ESP32 ao computador via cabo USB (porta `/dev/ttyACM0` ou equivalente).
+2. Compile e grave diretamente pela linha de comando ou VS Code:
    ```bash
    pio run -t upload
    ```
-3. Grave a interface web na memória flash (LittleFS):
+3. Para monitorar as leituras via terminal serial (115200 baud):
    ```bash
-   pio run -t uploadfs
+   pio device monitor
    ```
-
-### 2. Acessar a Interface Web do ESP32
-Ao ligar a placa, o IP atribuído será exibido no Monitor Serial (`115200` baud).
-* Pelo navegador no mesmo Wi-Fi: `http://<IP_DO_ESP32>`
-* Caso não conecte ao Wi-Fi, conecte-se à rede `ESP32-Sensor` (senha `12345678`) e acesse `http://192.168.4.1`.
-
-### 3. Executar o Servidor de Histórico (Backend Python + SQLite)
-Na pasta do projeto:
-```bash
-python3 backend/app.py
-```
-O servidor iniciará na porta `5000` (`http://localhost:5000`), coletando leituras e gerando histórico no banco SQLite local.
