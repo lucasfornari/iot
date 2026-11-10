@@ -3,91 +3,297 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sensor ESP32</title>
+<title>Sensor ESP32 - Monitoramento & Histórico</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 16px; }
-  h1 { font-size: 1.2rem; margin: 0 0 4px; }
-  #status { font-size: .85rem; color: #f66; margin-bottom: 16px; }
-  #status.ok { color: #6d6; }
-  .cartao { background: #1c1c1c; border-radius: 10px; padding: 12px; margin-bottom: 16px; }
-  .valor { font-size: 2.4rem; font-weight: bold; }
-  canvas { width: 100%; height: 180px; display: block; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #121212; color: #eee; margin: 0; padding: 16px; }
+  .container { max-width: 900px; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
+  h1 { font-size: 1.3rem; margin: 0; font-weight: 600; }
+  #status { font-size: .85rem; padding: 4px 10px; border-radius: 20px; background: #331515; color: #ff8888; display: inline-flex; align-items: center; gap: 6px; }
+  #status.ok { background: #123315; color: #77dd77; }
+  #status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+  /* Filtros de Linha do Tempo */
+  .filtros { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .btn-filtro {
+    background: #222; border: 1px solid #333; color: #aaa; padding: 6px 14px;
+    border-radius: 6px; cursor: pointer; font-size: .85rem; transition: all .2s;
+  }
+  .btn-filtro:hover { background: #2a2a2a; color: #fff; }
+  .btn-filtro.ativo { background: #0066cc; border-color: #0077ee; color: #fff; font-weight: bold; }
+
+  /* Cartões */
+  .grid-cartoes { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 16px; }
+  @media(min-width: 768px) { .grid-cartoes { grid-template-columns: 1fr 1fr; } }
+  .cartao { background: #1c1c1c; border-radius: 12px; padding: 16px; border: 1px solid #282828; }
+  .cartao-topo { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .titulo { font-size: .95rem; color: #aaa; text-transform: uppercase; letter-spacing: .5px; }
+  .valor { font-size: 2.2rem; font-weight: bold; }
+  .estatisticas { font-size: .75rem; color: #777; margin-top: 4px; display: flex; gap: 12px; }
+
+  /* Gráficos Canvas */
+  .canvas-container { position: relative; width: 100%; height: 200px; margin-top: 10px; }
+  canvas { width: 100%; height: 100%; display: block; }
+
+  .rodape { text-align: center; font-size: .75rem; color: #555; margin-top: 20px; }
 </style>
 </head>
 <body>
-  <h1>Sensor de temperatura e umidade</h1>
-  <div id="status">Conectando ao broker MQTT...</div>
+<div class="container">
+  <header>
+    <h1>Monitoramento de Temperatura & Umidade</h1>
+    <div id="status"><span class="dot"></span><span id="status-txt">Conectando...</span></div>
+  </header>
 
-  <div class="cartao">
-    Temperatura <div class="valor" id="valorTemperatura" style="color:#ff7b54">--.- °C</div>
-    <canvas id="graficoTemperatura"></canvas>
+  <!-- Barra de Filtros de Período -->
+  <div class="filtros">
+    <button class="btn-filtro ativo" onclick="selecionarPeriodo('tempo_real')">Tempo Real (2 min)</button>
+    <button class="btn-filtro" onclick="selecionarPeriodo('dia')">Dia (24 horas)</button>
+    <button class="btn-filtro" onclick="selecionarPeriodo('semana')">Semana (7 dias)</button>
+    <button class="btn-filtro" onclick="selecionarPeriodo('mes')">Mês (30 dias)</button>
+    <button class="btn-filtro" onclick="selecionarPeriodo('tudo')">Todo o Histórico</button>
   </div>
 
-  <div class="cartao">
-    Umidade <div class="valor" id="valorUmidade" style="color:#4fc3f7">-- %</div>
-    <canvas id="graficoUmidade"></canvas>
+  <div class="grid-cartoes">
+    <!-- Cartão de Temperatura -->
+    <div class="cartao">
+      <div class="cartao-topo">
+        <span class="titulo">Temperatura</span>
+        <div class="valor" id="valorTemperatura" style="color:#ff7b54">--.- °C</div>
+      </div>
+      <div class="estatisticas" id="statsTemperatura">Min: -- | Méd: -- | Max: --</div>
+      <div class="canvas-container">
+        <canvas id="graficoTemperatura"></canvas>
+      </div>
+    </div>
+
+    <!-- Cartão de Umidade -->
+    <div class="cartao">
+      <div class="cartao-topo">
+        <span class="titulo">Umidade</span>
+        <div class="valor" id="valorUmidade" style="color:#4fc3f7">-- %</div>
+      </div>
+      <div class="estatisticas" id="statsUmidade">Min: -- | Méd: -- | Max: --</div>
+      <div class="canvas-container">
+        <canvas id="graficoUmidade"></canvas>
+      </div>
+    </div>
   </div>
+
+  <div class="rodape">
+    Banco de dados: <span id="db-status">SQLite Local</span> • Os dados são mantidos mesmo sem sinal do ESP32.
+  </div>
+</div>
 
 <script src="mqtt.min.js"></script>
 <script>
-const MAX_PONTOS = 60; // últimas 60 leituras (2 min com leitura a cada 2 s)
-const historicoTemperatura = [];
-const historicoUmidade = [];
+let periodoAtual = 'tempo_real';
+const historicoTempoReal = {
+  temperatura: [],
+  umidade: [],
+  labels: []
+};
+const MAX_TEMPO_REAL = 60; // 60 leituras = 2 minutos (a cada 2s)
 
-// Desenha um gráfico de linha simples num <canvas>
-function desenharGrafico(canvas, dados, cor, unidade) {
+let dadosHistoricos = {
+  labels: [],
+  temperatura: [],
+  umidade: []
+};
+
+// URL base da API SQLite
+const API_URL = (location.port === '5000') ? '' : 'http://localhost:5000';
+
+// Salva leitura no SQLite local
+function enviarLeituraParaSQLite(temperatura, umidade) {
+  fetch(`${API_URL}/api/leituras`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ temperatura, umidade })
+  }).catch(() => {
+    // Silencia erro se a API não estiver ativa
+  });
+}
+
+// Busca histórico do SQLite para o período selecionado
+function carregarHistoricoSQLite(periodo) {
+  fetch(`${API_URL}/api/leituras?periodo=${periodo}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.leituras && data.leituras.length > 0) {
+        dadosHistoricos.labels = data.leituras.map(item => item.label);
+        dadosHistoricos.temperatura = data.leituras.map(item => Number(item.temperatura));
+        dadosHistoricos.umidade = data.leituras.map(item => Number(item.umidade));
+        document.getElementById('db-status').textContent = `SQLite Local (${data.leituras.length} registros)`;
+        atualizarGraficos();
+      } else {
+        document.getElementById('db-status').textContent = 'SQLite Local (sem registros no período)';
+        dadosHistoricos = { labels: [], temperatura: [], umidade: [] };
+        atualizarGraficos();
+      }
+    })
+    .catch(() => {
+      document.getElementById('db-status').textContent = 'SQLite Offline (usando memória local)';
+      atualizarGraficos();
+    });
+}
+
+function selecionarPeriodo(periodo) {
+  periodoAtual = periodo;
+  document.querySelectorAll('.btn-filtro').forEach(btn => {
+    btn.classList.toggle('ativo', btn.getAttribute('onclick').includes(`'${periodo}'`));
+  });
+
+  if (periodo === 'tempo_real') {
+    atualizarGraficos();
+  } else {
+    carregarHistoricoSQLite(periodo);
+  }
+}
+
+// Desenha gráfico dinâmico com eixos, escala e linha do tempo
+function desenharGrafico(canvasId, dados, labels, cor, unidade, elementoStats) {
+  const canvas = document.getElementById(canvasId);
   const largura = canvas.width = canvas.clientWidth * devicePixelRatio;
   const altura = canvas.height = canvas.clientHeight * devicePixelRatio;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, largura, altura);
-  if (dados.length < 2) return;
 
-  let minimo = Math.min(...dados), maximo = Math.max(...dados);
-  if (maximo - minimo < 2) { minimo -= 1; maximo += 1; }
-  const margem = 40 * devicePixelRatio;
-  const x = i => margem + i * (largura - margem) / (MAX_PONTOS - 1);
-  const y = v => altura - 10 - (v - minimo) * (altura - 20) / (maximo - minimo);
+  if (!dados || dados.length < 2) {
+    ctx.fillStyle = '#666';
+    ctx.font = `${12 * devicePixelRatio}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Aguardando leituras...', largura / 2, altura / 2);
+    return;
+  }
 
-  ctx.fillStyle = '#888';
-  ctx.font = `${11 * devicePixelRatio}px sans-serif`;
-  ctx.fillText(maximo.toFixed(1) + unidade, 0, y(maximo) + 4);
-  ctx.fillText(minimo.toFixed(1) + unidade, 0, y(minimo));
+  // Estatísticas
+  const min = Math.min(...dados);
+  const max = Math.max(...dados);
+  const media = dados.reduce((a, b) => a + b, 0) / dados.length;
+  if (elementoStats) {
+    elementoStats.textContent = `Mín: ${min.toFixed(1)}${unidade} | Méd: ${media.toFixed(1)}${unidade} | Máx: ${max.toFixed(1)}${unidade}`;
+  }
 
+  let yMin = min, yMax = max;
+  if (yMax - yMin < 2) { yMin -= 1; yMax += 1; }
+  const margemEsq = 36 * devicePixelRatio;
+  const margemInf = 22 * devicePixelRatio;
+  const margemSup = 10 * devicePixelRatio;
+  const margemDir = 10 * devicePixelRatio;
+
+  const graphWidth = largura - margemEsq - margemDir;
+  const graphHeight = altura - margemSup - margemInf;
+
+  const getX = i => margemEsq + (i * graphWidth / (dados.length - 1));
+  const getY = v => margemSup + graphHeight - ((v - yMin) * graphHeight / (yMax - yMin));
+
+  // Grade horizontal
+  ctx.strokeStyle = '#242424';
+  ctx.lineWidth = 1 * devicePixelRatio;
+  for (let i = 0; i <= 3; i++) {
+    const yVal = yMin + (i * (yMax - yMin) / 3);
+    const py = getY(yVal);
+    ctx.beginPath();
+    ctx.moveTo(margemEsq, py);
+    ctx.lineTo(largura - margemDir, py);
+    ctx.stroke();
+
+    ctx.fillStyle = '#666';
+    ctx.font = `${10 * devicePixelRatio}px sans-serif`;
+    ctx.textAlign = 'right';
+    ctx.fillText(yVal.toFixed(0) + unidade, margemEsq - 4 * devicePixelRatio, py + 3 * devicePixelRatio);
+  }
+
+  // Linha do tempo (Rótulos no eixo X)
+  if (labels && labels.length > 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = `${9 * devicePixelRatio}px sans-serif`;
+    ctx.textAlign = 'center';
+    const step = Math.ceil(labels.length / 5);
+    for (let i = 0; i < labels.length; i += step) {
+      const px = getX(i);
+      ctx.fillText(labels[i], px, altura - 4 * devicePixelRatio);
+    }
+  }
+
+  // Linha de dados com gradiente
   ctx.strokeStyle = cor;
   ctx.lineWidth = 2 * devicePixelRatio;
   ctx.beginPath();
-  dados.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)));
+  dados.forEach((v, i) => {
+    const px = getX(i);
+    const py = getY(v);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
   ctx.stroke();
+
+  // Área preenchida sob a curva
+  ctx.lineTo(getX(dados.length - 1), getY(yMin));
+  ctx.lineTo(getX(0), getY(yMin));
+  ctx.closePath();
+  ctx.fillStyle = cor.replace(')', ', 0.12)').replace('rgb', 'rgba').replace('#ff7b54', 'rgba(255, 123, 84, 0.12)').replace('#4fc3f7', 'rgba(79, 195, 247, 0.12)');
+  ctx.fill();
 }
 
-function adicionarPonto(historico, valor) {
-  historico.push(valor);
-  if (historico.length > MAX_PONTOS) historico.shift();
+function atualizarGraficos() {
+  const dados = (periodoAtual === 'tempo_real') ? historicoTempoReal : dadosHistoricos;
+  desenharGrafico('graficoTemperatura', dados.temperatura, dados.labels, '#ff7b54', '°', document.getElementById('statsTemperatura'));
+  desenharGrafico('graficoUmidade', dados.umidade, dados.labels, '#4fc3f7', '%', document.getElementById('statsUmidade'));
 }
 
-// Conecta no broker MQTT que roda no próprio ESP32 (porta 8080, WebSocket)
-const status = document.getElementById('status');
-const cliente = mqtt.connect(`ws://${location.hostname}:8080/`);
+// Configuração MQTT
+const statusBox = document.getElementById('status');
+const statusTxt = document.getElementById('status-txt');
+
+// Detecta se conecta ao broker do ESP32 ou local
+const hostBroker = (location.hostname && location.hostname !== '') ? location.hostname : '127.0.0.1';
+const portaBroker = (location.hostname === '192.168.4.1' || location.port === '80') ? 8080 : 9001;
+const cliente = mqtt.connect(`ws://${hostBroker}:${portaBroker}/`);
 
 cliente.on('connect', () => {
-  status.textContent = 'Conectado ao broker MQTT do ESP32';
-  status.className = 'ok';
+  statusTxt.textContent = 'Conectado ao Sensor (Gravando no SQLite)';
+  statusBox.className = 'ok';
   cliente.subscribe(['sensor/temperatura', 'sensor/umidade']);
 });
-cliente.on('close', () => { status.textContent = 'Desconectado — tentando reconectar...'; status.className = ''; });
+
+cliente.on('close', () => {
+  statusTxt.textContent = 'Sem sinal do sensor — Modo Offline (Histórico SQLite)';
+  statusBox.className = '';
+});
 
 cliente.on('message', (topico, mensagem) => {
   const valor = parseFloat(mensagem.toString());
+  const horaAgora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
   if (topico === 'sensor/temperatura') {
     document.getElementById('valorTemperatura').textContent = valor.toFixed(1) + ' °C';
-    adicionarPonto(historicoTemperatura, valor);
-    desenharGrafico(document.getElementById('graficoTemperatura'), historicoTemperatura, '#ff7b54', '°');
+    historicoTempoReal.temperatura.push(valor);
+    if (historicoTempoReal.temperatura.length > MAX_TEMPO_REAL) historicoTempoReal.temperatura.shift();
   } else if (topico === 'sensor/umidade') {
     document.getElementById('valorUmidade').textContent = valor.toFixed(0) + ' %';
-    adicionarPonto(historicoUmidade, valor);
-    desenharGrafico(document.getElementById('graficoUmidade'), historicoUmidade, '#4fc3f7', '%');
+    historicoTempoReal.umidade.push(valor);
+    if (historicoTempoReal.umidade.length > MAX_TEMPO_REAL) historicoTempoReal.umidade.shift();
+    
+    // Atualiza label de tempo após par de leitura
+    historicoTempoReal.labels.push(horaAgora);
+    if (historicoTempoReal.labels.length > MAX_TEMPO_REAL) historicoTempoReal.labels.shift();
+
+    // Envia par completo ao SQLite
+    const tempAtual = historicoTempoReal.temperatura[historicoTempoReal.temperatura.length - 1];
+    if (tempAtual !== undefined) {
+      enviarLeituraParaSQLite(tempAtual, valor);
+    }
+  }
+
+  if (periodoAtual === 'tempo_real') {
+    atualizarGraficos();
   }
 });
+
+window.addEventListener('resize', atualizarGraficos);
 </script>
 </body>
 </html>

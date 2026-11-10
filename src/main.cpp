@@ -10,7 +10,7 @@
 // ---------- Sensor ----------
 #define SENSOR_TEMPERATURA_UMIDADE_PIN 13
 #define SENSOR_TEMPERATURA_UMIDADE_TIPO DHT11
-const unsigned long INTERVALO_LEITURA_MS = 2000; // 2 segundos
+const unsigned long INTERVALO_LEITURA_MS = 500; // 2 segundos
 
 // ---------- Tópicos MQTT ----------
 #define TOPICO_TEMPERATURA "sensor/temperatura"
