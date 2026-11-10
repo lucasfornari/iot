@@ -1,104 +1,145 @@
 #include <Arduino.h>
-#include <DHT.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <PicoMQTT.h>
 #include <PicoWebsocket.h>
 #include "credenciais.h"
 
-// ---------- Sensor ----------
-#define SENSOR_TEMPERATURA_UMIDADE_PIN 13
-#define SENSOR_TEMPERATURA_UMIDADE_TIPO DHT11
-const unsigned long INTERVALO_LEITURA_MS = 500; // 2 segundos
+// ---------- Configurações de Hardware ----------
+#define SENSOR_PIN          13
+#define SENSOR_TIPO         DHT11
+#define I2C_SDA_PIN         21
+#define I2C_SCL_PIN         22
+#define OLED_LARGURA        128
+#define OLED_ALTURA         64
+#define OLED_ENDERECO       0x3C
 
-// ---------- Tópicos MQTT ----------
-#define TOPICO_TEMPERATURA "sensor/temperatura"
-#define TOPICO_UMIDADE     "sensor/umidade"
+// ---------- Configurações de Rede e MQTT ----------
+#define REDE_AP_NOME        "ESP32-Sensor"
+#define REDE_AP_SENHA       "12345678"
+#define TOPICO_TEMPERATURA  "sensor/temperatura"
+#define TOPICO_UMIDADE      "sensor/umidade"
+const unsigned long INTERVALO_LEITURA_MS = 1000;
 
-// ---------- Rede própria (usada se não conectar no Wi-Fi) ----------
-#define REDE_PROPRIA_NOME  "ESP32-Sensor"
-#define REDE_PROPRIA_SENHA "12345678"
+// ---------- Instâncias de Objetos ----------
+DHT dht(SENSOR_PIN, SENSOR_TIPO);
+Adafruit_SSD1306 display(OLED_LARGURA, OLED_ALTURA, &Wire, -1);
+WebServer servidor(80);
+WiFiServer mqttTcp(1883);
+WiFiServer mqttWsBase(8080);
+PicoWebsocket::Server<::WiFiServer> mqttWs(mqttWsBase, "mqtt");
+PicoMQTT::Server brokerMqtt(mqttTcp, mqttWs);
 
-// ---------- Portas ----------
-// 80   -> página web (index.html)
-// 1883 -> broker MQTT (clientes comuns: mosquitto_sub, MQTT Explorer...)
-// 8080 -> broker MQTT via WebSocket (usado pelo navegador)
-WebServer servidorPagina(80);
-WiFiServer servidorMqttTcp(1883);
-WiFiServer servidorMqttWebsocketBase(8080);
-PicoWebsocket::Server<::WiFiServer> servidorMqttWebsocket(servidorMqttWebsocketBase, "mqtt");
-PicoMQTT::Server brokerMqtt(servidorMqttTcp, servidorMqttWebsocket);
-
-DHT sensorTemperaturaUmidade(SENSOR_TEMPERATURA_UMIDADE_PIN, SENSOR_TEMPERATURA_UMIDADE_TIPO);
 unsigned long ultimaLeitura = 0;
 
-void conectarRede()
-{
-  if (strlen(WIFI_NOME) > 0)
-  {
-    Serial.printf("Conectando no Wi-Fi '%s'", WIFI_NOME);
+void atualizarDisplay(float temp, float umid) {
+  display.clearDisplay();
+
+  // Cabeçalho
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(25, 3);
+  display.print("CLIMA INTERNO");
+  display.drawLine(0, 13, 127, 13, SSD1306_WHITE);
+
+  // Temperatura
+  display.setCursor(4, 24);
+  display.print("Temp:");
+  display.setTextSize(2);
+  display.setCursor(44, 20);
+  display.printf("%.1f C", temp);
+
+  // Divisória horizontal
+  display.drawLine(4, 38, 123, 38, SSD1306_WHITE);
+
+  // Umidade
+  display.setTextSize(1);
+  display.setCursor(4, 47);
+  display.print("Umid:");
+  display.setTextSize(2);
+  display.setCursor(44, 43);
+  display.printf("%.0f %%", umid);
+
+  display.display();
+}
+
+void conectarRede() {
+  if (strlen(WIFI_NOME) > 0) {
+    Serial.printf("Conectando ao Wi-Fi '%s'", WIFI_NOME);
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_NOME, WIFI_SENHA);
-    for (int tentativa = 0; tentativa < 30 && WiFi.status() != WL_CONNECTED; tentativa++)
-    {
+    for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; i++) {
       delay(500);
       Serial.print(".");
     }
     Serial.println();
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      Serial.printf("Conectado! Abra no navegador: http://%s\n", WiFi.localIP().toString().c_str());
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("Conectado! IP: http://%s\n", WiFi.localIP().toString().c_str());
       return;
     }
-    Serial.println("Não conectou no Wi-Fi.");
+    Serial.println("Falha na conexão Wi-Fi.");
   }
 
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(REDE_PROPRIA_NOME, REDE_PROPRIA_SENHA);
-  Serial.printf("Rede própria criada: '%s' (senha %s)\n", REDE_PROPRIA_NOME, REDE_PROPRIA_SENHA);
-  Serial.printf("Conecte nela e abra: http://%s\n", WiFi.softAPIP().toString().c_str());
+  WiFi.softAP(REDE_AP_NOME, REDE_AP_SENHA);
+  Serial.printf("Ponto de acesso criado: '%s' (IP: http://%s)\n", REDE_AP_NOME, WiFi.softAPIP().toString().c_str());
 }
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
-  sensorTemperaturaUmidade.begin();
 
-  if (!LittleFS.begin())
-  {
-    Serial.println("Erro: LittleFS vazio. Rode 'pio run -t uploadfs'.");
+  // Inicializa I2C e Display OLED
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ENDERECO)) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(20, 28);
+    display.print("Iniciando...");
+    display.display();
+  } else {
+    Serial.println("Aviso: Falha ao inicializar display OLED.");
+  }
+
+  dht.begin();
+
+  if (!LittleFS.begin()) {
+    Serial.println("Erro: LittleFS não montado. Execute 'pio run -t uploadfs'.");
   }
 
   conectarRede();
 
-  servidorPagina.serveStatic("/", LittleFS, "/index.html");
-  servidorPagina.serveStatic("/mqtt.min.js", LittleFS, "/mqtt.min.js");
-  servidorPagina.begin();
-  brokerMqtt.begin();
+  // Servidor web estático (LittleFS)
+  servidor.serveStatic("/", LittleFS, "/index.html");
+  servidor.serveStatic("/mqtt.min.js", LittleFS, "/mqtt.min.js");
+  servidor.begin();
 
-  Serial.println("Página na porta 80 | MQTT na 1883 | MQTT/WebSocket na 8080");
+  brokerMqtt.begin();
+  Serial.println("Sistema pronto: Web :80 | MQTT :1883 | WebSocket :8080");
 }
 
-void loop()
-{
-  servidorPagina.handleClient();
+void loop() {
+  servidor.handleClient();
   brokerMqtt.loop();
 
-  if (millis() - ultimaLeitura >= INTERVALO_LEITURA_MS)
-  {
+  if (millis() - ultimaLeitura >= INTERVALO_LEITURA_MS) {
     ultimaLeitura = millis();
-    float temperatura = sensorTemperaturaUmidade.readTemperature();
-    float umidade = sensorTemperaturaUmidade.readHumidity();
+    float temperatura = dht.readTemperature();
+    float umidade = dht.readHumidity();
 
-    if (isnan(temperatura) || isnan(umidade))
-    {
-      Serial.println("Falha na leitura do sensor de temperatura e umidade");
+    if (isnan(temperatura) || isnan(umidade)) {
+      Serial.println("Falha na leitura do sensor DHT11.");
       return;
     }
 
     Serial.printf("Temperatura: %.1f C | Umidade: %.0f %%\n", temperatura, umidade);
     brokerMqtt.publish(TOPICO_TEMPERATURA, String(temperatura, 1));
     brokerMqtt.publish(TOPICO_UMIDADE, String(umidade, 0));
+    atualizarDisplay(temperatura, umidade);
   }
 }
