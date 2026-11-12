@@ -5,6 +5,8 @@
 class DetectorPalmas {
  public:
   static constexpr int LIMIAR_MINIMO = 700;
+  static constexpr uint32_t INTERVALO_MINIMO_PALMAS = 80;
+  static constexpr uint32_t INTERVALO_MAXIMO_PALMAS = 600;
   struct Resultado {
     bool inicio = false;
     bool aceito = false;
@@ -16,7 +18,7 @@ class DetectorPalmas {
   Resultado processar(int vpp, uint32_t agora) {
     Resultado r;
     if (!iniciado) { iniciado = true; inicioDetector = agora; }
-    if (!pulso && contagem && agora - ultimaPalma > 600) {
+    if (!pulso && contagem && agora - ultimaPalma > INTERVALO_MAXIMO_PALMAS) {
       if (contagem <= 2) r.acao = contagem;
       contagem = 0;
     }
@@ -38,6 +40,12 @@ class DetectorPalmas {
         r.duracao = agora - inicioPulso;
         ++contagem;
         ultimaPalma = inicioPulso;
+        tevePalma = true;
+        // A segunda palma já define a ação; não espera outra janela de 600 ms.
+        if (contagem == 2) {
+          r.acao = 2;
+          contagem = 0;
+        }
         quieto = false;
       } else if (agora - inicioPulso >= 120) {
         pulso = false;
@@ -50,7 +58,7 @@ class DetectorPalmas {
       ultimoSilencio = agora;
       if (!quieto) { quieto = true; inicioSilencio = agora; }
       if (agora - inicioSilencio >= 25 &&
-          (!contagem || agora - ultimaPalma >= 120)) armado = true;
+          (!tevePalma || agora - ultimaPalma >= INTERVALO_MINIMO_PALMAS)) armado = true;
       // Só aprende em repouso estável. Fala/pulsos e pausas entre palmas
       // não aumentam o fundo nem tornam a segunda palma mais difícil.
       if (armado && !contagem && agora - inicioSilencio >= 300) {
@@ -87,6 +95,7 @@ class DetectorPalmas {
     return x < minimo ? minimo : (x > maximo ? maximo : x);
   }
   bool iniciado = false, quieto = false, retornando = false;
+  bool tevePalma = false;
   uint32_t inicioDetector = 0, inicioSilencio = 0, ultimoSilencio = 0;
   uint32_t inicioPulso = 0, inicioRetorno = 0, ultimaPalma = 0;
 };

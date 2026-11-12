@@ -122,7 +122,10 @@ O detector em `include/detector_palmas.h` aprende o fundo somente após
 300 ms de silêncio estável, limita o limiar entre 700 e 1000 e o congela
 durante a sequência. Exige ataque em até 25 ms após o silêncio, queda de
 amplitude sustentada por 12 ms e duração de até aproximadamente 120 ms.
-O intervalo entre inícios de palmas deve ficar entre 120 e 600 ms. Esses
+O intervalo entre inícios de palmas deve ficar entre 80 e 600 ms, com
+silêncio suficiente para rearmar o detector. A umidade aparece assim que
+a segunda palma é validada; uma palma isolada aguarda 600 ms para confirmar
+a temperatura. Esses
 critérios temporais ainda podem aceitar outros impactos e sílabas curtas;
 a saturação sinalizada por `clip` precisa ser avaliada também no ganho do MAX4466.
 

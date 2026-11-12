@@ -29,12 +29,16 @@ int main() {
   { Cenario c; c.preparar(); c.som(80, 3000); assert(!c.aceitos); }
   { Cenario c; c.preparar(); c.palma(740); c.som(80, 700);
     assert(c.simples == 1 && c.aceitos == 1); }
-  for (int intervalo : {150, 200, 300, 400, 550}) {
+  for (int intervalo : {85, 100, 120, 150, 200, 300, 400, 550, 600}) {
     Cenario c; c.preparar(); c.palma(4095); c.som(80, intervalo - 60);
     float limiar = c.d.limiar;
     c.palma(740); assert(c.d.limiar == limiar);
+    assert(c.duplas == 1 && c.simples == 0); // Sem espera após a segunda palma.
     c.som(80, 700); assert(c.duplas == 1 && c.simples == 0);
   }
+  { Cenario c; c.preparar(); c.palma(); c.som(80, 40); c.palma();
+    c.som(80, 10); c.palma(); // Eco após a segunda palma não vira comando.
+    c.som(80, 700); assert(c.duplas == 1 && c.simples == 0); }
   { Cenario c; c.preparar(); c.palma(); c.som(80, 650); c.palma();
     c.som(80, 700); assert(c.simples == 2 && !c.duplas); }
   { Cenario c; c.preparar(); c.som(1600, 1000); c.som(80, 1000);
