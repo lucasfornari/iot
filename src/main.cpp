@@ -19,7 +19,6 @@
 #define ENDERECO_TELA_OLED  0x3C
 
 // ---------- Configurações de Detecção Sonora (Palmas/Estalos) ----------
-const int LIMIAR_PALMA_VPP = DetectorPalmas::LIMIAR_MINIMO;
 const unsigned long TEMPO_EXIBICAO = 5000;  // Tempo de exibição da tela antes de voltar ao standby (5s)
 
 // ---------- Estados da Tela ----------
@@ -70,95 +69,74 @@ void amostrarMicrofone(void *) {
   }
 }
 
-// Diagnóstico em Vpp do ADC (não representa dB SPL).
-int nivelMic = 0;
-float limiarMic = LIMIAR_PALMA_VPP;
-int ultimaContagem = 0;
-unsigned long tempoFeedback = 0;
+// ---------- Interface OLED bicolor ----------
+// A cor é física: linhas 0–15 amarelas, linhas 16–63 azuis.
+// Mantém cada texto inteiro em uma única faixa, com margem na transição.
+const int ALTURA_FAIXA_AMARELA = 16;
 
-void desenharMicrofone() {
-  telaOled.fillRect(0, 46, 128, 18, SSD1306_BLACK);
-  telaOled.setTextSize(1);
-  telaOled.setTextColor(SSD1306_WHITE);
-  telaOled.setCursor(0, 46);
-  telaOled.printf("M%4d L%4d P%d", nivelMic, int(limiarMic), ultimaContagem);
-  telaOled.drawRect(0, 57, 128, 7, SSD1306_WHITE);
-  int largura = constrain(map(nivelMic, 0, 4095, 0, 126), 0L, 126L);
-  telaOled.fillRect(1, 58, largura, 5, SSD1306_WHITE);
-  int marca = constrain(map(int(limiarMic), 0, 4095, 1, 126), 1L, 126L);
-  telaOled.drawFastVLine(marca, 56, 8, SSD1306_INVERSE);
+void desenharTextoCentralizado(const char *texto, int y, int tamanho) {
+  telaOled.setTextSize(tamanho);
+  int16_t xInicial, yInicial;
+  uint16_t largura, altura;
+  telaOled.getTextBounds(texto, 0, y, &xInicial, &yInicial, &largura, &altura);
+  telaOled.setCursor((LARGURA_TELA_OLED - int(largura)) / 2 - xInicial, y);
+  telaOled.print(texto);
 }
 
-// ---------- Funções de Interface Gráfica ----------
+void desenharCabecalho() {
+  telaOled.clearDisplay();
+  telaOled.setTextWrap(false);
+  telaOled.setTextColor(SSD1306_WHITE);
+  desenharTextoCentralizado("CLIMA INTERNO", 4, 1);
+  // Separador já na área azul; deixa a divisão das cores respirar.
+  telaOled.drawFastHLine(8, ALTURA_FAIXA_AMARELA + 1, 112, SSD1306_WHITE);
+}
 
 void desenharStandby() {
-  telaOled.clearDisplay();
+  desenharCabecalho();
 
-  // Moldura decorativa estilizada
-  telaOled.drawRect(8, 6, 112, 52, SSD1306_WHITE);
-  telaOled.drawRect(10, 8, 108, 48, SSD1306_WHITE);
+  // Símbolo climático inteiramente na área azul, ao lado do estado.
+  telaOled.drawCircle(15, 27, 5, SSD1306_WHITE);
+  telaOled.drawFastVLine(15, 19, 2, SSD1306_WHITE);
+  telaOled.drawFastHLine(6, 27, 2, SSD1306_WHITE);
+  telaOled.drawFastHLine(22, 27, 2, SSD1306_WHITE);
+  telaOled.fillCircle(17, 34, 4, SSD1306_WHITE);
+  telaOled.fillCircle(23, 31, 5, SSD1306_WHITE);
+  telaOled.fillCircle(29, 35, 4, SSD1306_WHITE);
+  telaOled.fillRect(17, 34, 13, 5, SSD1306_WHITE);
 
-  // Logo / Título centralizado
-  telaOled.setTextColor(SSD1306_WHITE);
   telaOled.setTextSize(2);
-  
-  // "CLIMA" centralizado (5 chars * 12px = 60px -> X = (128 - 60)/2 = 34)
-  telaOled.setCursor(34, 16);
-  telaOled.print("CLIMA");
+  telaOled.setCursor(45, 25);
+  telaOled.print("PRONTO");
+  desenharTextoCentralizado("1 palma: temperatura", 45, 1);
+  desenharTextoCentralizado("2 palmas: umidade", 56, 1);
+  telaOled.display();
+}
 
-  // "INTERNO" centralizado (7 chars * 12px = 84px -> X = (128 - 84)/2 = 22)
-  telaOled.setCursor(22, 30);
-  telaOled.print("INTERNO");
+void desenharLeitura(const char *titulo, const char *valor) {
+  desenharCabecalho();
+  desenharTextoCentralizado(titulo, 21, 1);
+  desenharTextoCentralizado(valor, 34, 2);
 
-  desenharMicrofone();
+  // Progresso discreto na área azul; esvazia em cinco segundos.
+  unsigned long decorrido = millis() - tempoInicioExibicao;
+  unsigned long restante = decorrido >= TEMPO_EXIBICAO ? 0 : TEMPO_EXIBICAO - decorrido;
+  int largura = (restante * 110UL) / TEMPO_EXIBICAO;
+  telaOled.drawRoundRect(8, 57, 112, 5, 2, SSD1306_WHITE);
+  if (largura > 0) telaOled.fillRect(9, 58, largura, 3, SSD1306_WHITE);
   telaOled.display();
 }
 
 void desenharTemperatura(float temp) {
-  telaOled.clearDisplay();
-  telaOled.setTextColor(SSD1306_WHITE);
-
-  // Cabeçalho
-  telaOled.setTextSize(1);
-  telaOled.setCursor(25, 2);
-  telaOled.print("CLIMA INTERNO");
-  telaOled.drawLine(0, 12, 127, 12, SSD1306_WHITE);
-
-  // Subtítulo
-  telaOled.setCursor(31, 16);
-  telaOled.print("TEMPERATURA");
-
-  // Valor em destaque
-  telaOled.setTextSize(2);
-  // Centraliza o texto "XX.X C"
-  telaOled.setCursor(28, 27);
-  telaOled.printf("%.1f C", temp);
-
-  desenharMicrofone();
-  telaOled.display();
+  char valor[20];
+  snprintf(valor, sizeof(valor), "%.1f C", temp);
+  desenharLeitura("TEMPERATURA", valor);
 }
 
 void desenharUmidade(float umid) {
-  telaOled.clearDisplay();
-  telaOled.setTextColor(SSD1306_WHITE);
-
-  // Cabeçalho
-  telaOled.setTextSize(1);
-  telaOled.setCursor(25, 2);
-  telaOled.print("CLIMA INTERNO");
-  telaOled.drawLine(0, 12, 127, 12, SSD1306_WHITE);
-
-  // Subtítulo
-  telaOled.setCursor(43, 16);
-  telaOled.print("UMIDADE");
-
-  // Valor em destaque
-  telaOled.setTextSize(2);
-  telaOled.setCursor(40, 27);
-  telaOled.printf("%.0f %%", umid);
-
-  desenharMicrofone();
-  telaOled.display();
+  char valor[20];
+  snprintf(valor, sizeof(valor), "%.0f %%", umid);
+  desenharLeitura("UMIDADE", valor);
 }
 
 void setup() {
@@ -229,8 +207,6 @@ void loop() {
                     janela.tempo, janela.vpp, detector.limiar);
     }
     if (resultado.aceito) {
-      ultimaContagem = detector.contagem;
-      tempoFeedback = agora;
       Serial.printf("[SOM] t=%lu pico=%d duracao=%lu contagem=%d\n",
                     janela.tempo, detector.pico, resultado.duracao, detector.contagem);
     }
@@ -248,8 +224,6 @@ void loop() {
     janelas++;
   }
   if (agora - ultimoLog >= 100 && janelas) {
-    nivelMic = picoLog;
-    limiarMic = detector.limiar;
     Serial.printf("[MIC] t=%lu pico=%d fundo=%.0f limiar=%.0f armado=%d pulso=%d contagem=%d n=%d clip=%d gap=%lu perdidas=%lu\n",
                   ultimaJanela, picoLog, detector.fundo, detector.limiar,
                   detector.armado, detector.pulso, detector.contagem,
@@ -267,7 +241,6 @@ void loop() {
   static unsigned long ultimaTela = 0;
   if (agora - ultimaTela >= 100) {
     ultimaTela = agora;
-    if (agora - tempoFeedback > 1500) ultimaContagem = 0;
     if (estadoAtual == ESTADO_TEMPERATURA) {
       desenharTemperatura(temperaturaAtual);
     } else if (estadoAtual == ESTADO_UMIDADE) {

@@ -30,15 +30,10 @@ O firmware opera de forma autônoma e offline, com amostragem contínua de áudi
 A interface do display OLED alterna entre três modos dinâmicos acionados por som:
 
 ### 1. Modo Standby (Repouso)
-A tela inicial exibe exclusivamente o logotipo estilizado com moldura:
-```text
-+------------------------------+
-|                              |
-|            CLIMA             |
-|           INTERNO            |
-|                              |
-+------------------------------+
-```
+O display bicolor reserva as linhas **0–15 (amarelo)** para o título
+`CLIMA INTERNO`. A área **16–63 (azul)** mostra um ícone climático,
+`PRONTO` e os atalhos `1 palma: temperatura` / `2 palmas: umidade`.
+Os textos respeitam a divisão física das cores, sem atravessá-la.
 
 ### 2. Tela de Temperatura (1 Palma / Estalo)
 Ao detectar um pulso sonoro nítido, exibe a temperatura atual com indicador regressivo de tempo:
@@ -110,11 +105,9 @@ A sensibilidade pode ser calibrada de duas maneiras:
 
 ## Diagnóstico do microfone
 
-O rodapé do OLED mostra `M` (pico Vpp recente do ADC), `L` (limiar de
-ativação) e `P` (contagem de pulsos aceitos, exibida por 1,5 s). A barra
-representa a amplitude de 0 a 4095; a marca vertical indica o limiar.
-Esses valores são unidades do ADC, não decibéis. O rodapé substitui a
-barra regressiva durante o diagnóstico; o retorno ao standby continua em 5 s.
+O diagnóstico do microfone fica apenas na serial. O OLED exibe a interface
+de clima, sem níveis ou limiares. Nas telas de temperatura e umidade, a
+barra inferior mostra o tempo restante até o standby (5 s).
 
 A serial a 115200 baud publica `[MIC]` a cada aproximadamente 100 ms:
 `pico`, `fundo`, `limiar`, `armado`, `pulso`, `contagem`,
