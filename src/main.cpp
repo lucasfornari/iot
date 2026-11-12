@@ -3,6 +3,10 @@
 #include <DHT.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "detector_palmas.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
 
 // ---------- Configurações de Hardware ----------
 #define PINO_SENSOR_DHT     13
@@ -15,9 +19,7 @@
 #define ENDERECO_TELA_OLED  0x3C
 
 // ---------- Configurações de Detecção Sonora (Palmas/Estalos) ----------
-const int LIMIAR_PALMA_VPP         = 1050;   // Amplitude mínima para considerar palma/estalo
-const unsigned long REFRATARIO_MS  = 180;   // Tempo mínimo entre duas palmas (evita eco da mesma palma)
-const unsigned long JANELA_CONFIRM = 450;   // Tempo máximo após última palma para fechar a contagem
+const int LIMIAR_PALMA_VPP = DetectorPalmas::LIMIAR_MINIMO;
 const unsigned long TEMPO_EXIBICAO = 5000;  // Tempo de exibição da tela antes de voltar ao standby (5s)
 
 // ---------- Estados da Tela ----------
@@ -37,9 +39,55 @@ float temperaturaAtual = 0.0;
 float umidadeAtual = 0.0;
 unsigned long tempoUltimoDHT = 0;
 
-int palmasContadas = 0;
-unsigned long tempoUltimaPalma = 0;
 unsigned long tempoInicioExibicao = 0;
+
+// Aquisição separada: OLED/serial/DHT não suspendem o leitor do ADC.
+struct JanelaMic {
+  uint32_t tempo;
+  uint32_t sequencia;
+  int vpp;
+  bool saturada;
+};
+QueueHandle_t filaMic;
+DetectorPalmas detector;
+
+void amostrarMicrofone(void *) {
+  uint32_t sequencia = 0;
+  for (;;) {
+    int minimo = 4095, maximo = 0;
+    uint32_t inicio = micros();
+    while (uint32_t(micros() - inicio) < 4000) {
+      int leitura = analogRead(PINO_MIC);
+      if (leitura < minimo) minimo = leitura;
+      if (leitura > maximo) maximo = leitura;
+      delayMicroseconds(50);
+    }
+    JanelaMic janela{millis(), sequencia++, maximo - minimo,
+                      minimo <= 5 || maximo >= 4090};
+    // Sem bloqueio: uma perda fica identificável pelo número de sequência.
+    xQueueSend(filaMic, &janela, 0);
+    vTaskDelay(1);  // Cede CPU ao sistema entre janelas de 4 ms.
+  }
+}
+
+// Diagnóstico em Vpp do ADC (não representa dB SPL).
+int nivelMic = 0;
+float limiarMic = LIMIAR_PALMA_VPP;
+int ultimaContagem = 0;
+unsigned long tempoFeedback = 0;
+
+void desenharMicrofone() {
+  telaOled.fillRect(0, 46, 128, 18, SSD1306_BLACK);
+  telaOled.setTextSize(1);
+  telaOled.setTextColor(SSD1306_WHITE);
+  telaOled.setCursor(0, 46);
+  telaOled.printf("M%4d L%4d P%d", nivelMic, int(limiarMic), ultimaContagem);
+  telaOled.drawRect(0, 57, 128, 7, SSD1306_WHITE);
+  int largura = constrain(map(nivelMic, 0, 4095, 0, 126), 0L, 126L);
+  telaOled.fillRect(1, 58, largura, 5, SSD1306_WHITE);
+  int marca = constrain(map(int(limiarMic), 0, 4095, 1, 126), 1L, 126L);
+  telaOled.drawFastVLine(marca, 56, 8, SSD1306_INVERSE);
+}
 
 // ---------- Funções de Interface Gráfica ----------
 
@@ -59,13 +107,14 @@ void desenharStandby() {
   telaOled.print("CLIMA");
 
   // "INTERNO" centralizado (7 chars * 12px = 84px -> X = (128 - 84)/2 = 22)
-  telaOled.setCursor(22, 34);
+  telaOled.setCursor(22, 30);
   telaOled.print("INTERNO");
 
+  desenharMicrofone();
   telaOled.display();
 }
 
-void desenharTemperatura(float temp, unsigned long tempoRestanteMs) {
+void desenharTemperatura(float temp) {
   telaOled.clearDisplay();
   telaOled.setTextColor(SSD1306_WHITE);
 
@@ -80,22 +129,16 @@ void desenharTemperatura(float temp, unsigned long tempoRestanteMs) {
   telaOled.print("TEMPERATURA");
 
   // Valor em destaque
-  telaOled.setTextSize(3);
+  telaOled.setTextSize(2);
   // Centraliza o texto "XX.X C"
-  telaOled.setCursor(14, 28);
+  telaOled.setCursor(28, 27);
   telaOled.printf("%.1f C", temp);
 
-  // Barra regressiva de tempo até retornar ao standby
-  int barra = map(tempoRestanteMs, 0, TEMPO_EXIBICAO, 0, 120);
-  telaOled.drawRect(4, 56, 120, 5, SSD1306_WHITE);
-  if (barra > 0) {
-    telaOled.fillRect(4, 56, constrain(barra, 0, 120), 5, SSD1306_WHITE);
-  }
-
+  desenharMicrofone();
   telaOled.display();
 }
 
-void desenharUmidade(float umid, unsigned long tempoRestanteMs) {
+void desenharUmidade(float umid) {
   telaOled.clearDisplay();
   telaOled.setTextColor(SSD1306_WHITE);
 
@@ -110,17 +153,11 @@ void desenharUmidade(float umid, unsigned long tempoRestanteMs) {
   telaOled.print("UMIDADE");
 
   // Valor em destaque
-  telaOled.setTextSize(3);
-  telaOled.setCursor(28, 28);
+  telaOled.setTextSize(2);
+  telaOled.setCursor(40, 27);
   telaOled.printf("%.0f %%", umid);
 
-  // Barra regressiva de tempo até retornar ao standby
-  int barra = map(tempoRestanteMs, 0, TEMPO_EXIBICAO, 0, 120);
-  telaOled.drawRect(4, 56, 120, 5, SSD1306_WHITE);
-  if (barra > 0) {
-    telaOled.fillRect(4, 56, constrain(barra, 0, 120), 5, SSD1306_WHITE);
-  }
-
+  desenharMicrofone();
   telaOled.display();
 }
 
@@ -133,6 +170,7 @@ void setup() {
 
   // Inicializa barramento I2C e tela OLED
   Wire.begin(PINO_I2C_SDA, PINO_I2C_SCL);
+  Wire.setClock(400000);
   if (telaOled.begin(SSD1306_SWITCHCAPVCC, ENDERECO_TELA_OLED)) {
     desenharStandby();
   } else {
@@ -154,68 +192,92 @@ void setup() {
   Serial.println(" - 2 Palmas -> Exibe UMIDADE");
   Serial.println(" - Retorna automaticamente ao Standby apos 5s");
   Serial.println("==================================================");
+  filaMic = xQueueCreate(64, sizeof(JanelaMic));
+  if (!filaMic || xTaskCreatePinnedToCore(amostrarMicrofone, "microfone", 3072,
+                                         nullptr, 2, nullptr, 0) != pdPASS) {
+    Serial.println("[ERRO] Falha ao iniciar aquisicao do microfone");
+    while (true) delay(1000);
+  }
 }
 
 void loop() {
   unsigned long agora = millis();
 
-  // 1. Amostragem rápida do microfone MAX4466 (janela de 25 ms)
-  const unsigned long JANELA_AMOSTRAGEM_MS = 25;
-  unsigned long inicioJanela = agora;
-  unsigned int pMin = 4095;
-  unsigned int pMax = 0;
-
-  while (millis() - inicioJanela < JANELA_AMOSTRAGEM_MS) {
-    int leitura = analogRead(PINO_MIC);
-    if (leitura < pMin) pMin = leitura;
-    if (leitura > pMax) pMax = leitura;
-    delayMicroseconds(50);
-  }
-
-  int vpp = (pMax >= pMin) ? (pMax - pMin) : 0;
-  agora = millis();
-
-  // 2. Detecção de Pico Sonoro (Palma / Estalo)
-  if (vpp >= LIMIAR_PALMA_VPP) {
-    if (agora - tempoUltimaPalma > REFRATARIO_MS) {
-      palmasContadas++;
-      tempoUltimaPalma = agora;
-      Serial.printf("[SOM] Pico detectado! Vpp: %d -> Palma #%d\n", vpp, palmasContadas);
-    }
-  }
-
-  // 3. Confirmação do número de palmas após silêncio de validação
-  if (palmasContadas > 0 && (agora - tempoUltimaPalma > JANELA_CONFIRM)) {
-    if (palmasContadas == 1) {
-      estadoAtual = ESTADO_TEMPERATURA;
-      tempoInicioExibicao = agora;
-      Serial.println("[AÇÃO] 1 Palma -> Exibindo TEMPERATURA");
-    } else if (palmasContadas >= 2) {
-      estadoAtual = ESTADO_UMIDADE;
-      tempoInicioExibicao = agora;
-      Serial.printf("[AÇÃO] %d Palmas -> Exibindo UMIDADE\n", palmasContadas);
-    }
-    palmasContadas = 0;
-  }
-
-  // 4. Temporizador de retorno para Standby
-  if (estadoAtual != ESTADO_STANDBY) {
-    unsigned long tempoDecorrido = agora - tempoInicioExibicao;
-    if (tempoDecorrido >= TEMPO_EXIBICAO) {
-      estadoAtual = ESTADO_STANDBY;
-      desenharStandby();
-      Serial.println("[STANDBY] Retornando ao logo CLIMA INTERNO");
-    } else {
-      unsigned long tempoRestante = TEMPO_EXIBICAO - tempoDecorrido;
-      if (estadoAtual == ESTADO_TEMPERATURA) {
-        desenharTemperatura(temperaturaAtual, tempoRestante);
-      } else if (estadoAtual == ESTADO_UMIDADE) {
-        desenharUmidade(umidadeAtual, tempoRestante);
+  static uint32_t ultimoLog = 0, ultimaJanela = 0, ultimaSequencia = 0;
+  static uint32_t maiorIntervalo = 0, perdidas = 0;
+  static bool recebeuJanela = false;
+  static int picoLog = 0, saturadas = 0, janelas = 0;
+  JanelaMic janela;
+  while (xQueueReceive(filaMic, &janela, 0) == pdTRUE) {
+    if (recebeuJanela) {
+      uint32_t intervalo = janela.tempo - ultimaJanela;
+      maiorIntervalo = max(maiorIntervalo, intervalo);
+      uint32_t faltantes = janela.sequencia - ultimaSequencia - 1;
+      if (faltantes || intervalo > 25) {
+        perdidas += faltantes;
+        detector.interromper();
+        Serial.printf("[LACUNA] t=%lu gap=%lu perdidas=%lu\n",
+                      janela.tempo, intervalo, faltantes);
       }
     }
+    recebeuJanela = true;
+    ultimaJanela = janela.tempo;
+    ultimaSequencia = janela.sequencia;
+    auto resultado = detector.processar(janela.vpp, janela.tempo);
+    if (resultado.inicio) {
+      Serial.printf("[INICIO] t=%lu vpp=%d limiar=%.0f\n",
+                    janela.tempo, janela.vpp, detector.limiar);
+    }
+    if (resultado.aceito) {
+      ultimaContagem = detector.contagem;
+      tempoFeedback = agora;
+      Serial.printf("[SOM] t=%lu pico=%d duracao=%lu contagem=%d\n",
+                    janela.tempo, detector.pico, resultado.duracao, detector.contagem);
+    }
+    if (resultado.rejeitado) {
+      Serial.printf("[REJEITADO] t=%lu motivo=longo pico=%d duracao=%lu\n",
+                    janela.tempo, detector.pico, resultado.duracao);
+    }
+    if (resultado.acao) {
+      estadoAtual = resultado.acao == 1 ? ESTADO_TEMPERATURA : ESTADO_UMIDADE;
+      tempoInicioExibicao = agora;
+      Serial.printf("[ACAO] t=%lu palmas=%d\n", janela.tempo, resultado.acao);
+    }
+    picoLog = max(picoLog, janela.vpp);
+    saturadas += janela.saturada;
+    janelas++;
+  }
+  if (agora - ultimoLog >= 100 && janelas) {
+    nivelMic = picoLog;
+    limiarMic = detector.limiar;
+    Serial.printf("[MIC] t=%lu pico=%d fundo=%.0f limiar=%.0f armado=%d pulso=%d contagem=%d n=%d clip=%d gap=%lu perdidas=%lu\n",
+                  ultimaJanela, picoLog, detector.fundo, detector.limiar,
+                  detector.armado, detector.pulso, detector.contagem,
+                  janelas, saturadas, maiorIntervalo, perdidas);
+    ultimoLog = agora;
+    picoLog = saturadas = janelas = 0;
+    maiorIntervalo = perdidas = 0;
   }
 
-  // 5. Atualização periódica do sensor DHT a cada 2 segundos (não-bloqueante)
+  if (estadoAtual != ESTADO_STANDBY && agora - tempoInicioExibicao >= TEMPO_EXIBICAO) {
+    estadoAtual = ESTADO_STANDBY;
+    Serial.println("[STANDBY] Retornando ao logo CLIMA INTERNO");
+  }
+  // Atualiza OLED a 10 Hz em vez de bloquear cada janela de áudio.
+  static unsigned long ultimaTela = 0;
+  if (agora - ultimaTela >= 100) {
+    ultimaTela = agora;
+    if (agora - tempoFeedback > 1500) ultimaContagem = 0;
+    if (estadoAtual == ESTADO_TEMPERATURA) {
+      desenharTemperatura(temperaturaAtual);
+    } else if (estadoAtual == ESTADO_UMIDADE) {
+      desenharUmidade(umidadeAtual);
+    } else {
+      desenharStandby();
+    }
+  }
+
+  // Leitura DHT periódica; a tarefa do microfone continua durante a chamada.
   if (agora - tempoUltimoDHT >= 2000) {
     tempoUltimoDHT = agora;
     float t = sensorDht.readTemperature();

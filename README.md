@@ -107,3 +107,43 @@ A sensibilidade pode ser calibrada de duas maneiras:
    ```bash
    pio device monitor
    ```
+
+## Diagnóstico do microfone
+
+O rodapé do OLED mostra `M` (pico Vpp recente do ADC), `L` (limiar de
+ativação) e `P` (contagem de pulsos aceitos, exibida por 1,5 s). A barra
+representa a amplitude de 0 a 4095; a marca vertical indica o limiar.
+Esses valores são unidades do ADC, não decibéis. O rodapé substitui a
+barra regressiva durante o diagnóstico; o retorno ao standby continua em 5 s.
+
+A serial a 115200 baud publica `[MIC]` a cada aproximadamente 100 ms:
+`pico`, `fundo`, `limiar`, `armado`, `pulso`, `contagem`,
+`n` (janelas amostradas), `clip` (janelas próximas dos limites do ADC) e
+`gap` (maior intervalo em ms entre janelas) e `perdidas` (janelas descartadas
+por fila cheia). `[INICIO]`, `[SOM]`, `[REJEITADO]`, `[ACAO]` e `[LACUNA]`
+ajudam a rastrear a decisão. A leitura do ADC ocorre em uma tarefa separada,
+com janelas de 4 ms e uma pausa de um tick entre elas; a fila comporta
+64 janelas. Lacunas acima de 25 ms ou perdas cancelam a sequência pendente.
+
+O detector em `include/detector_palmas.h` aprende o fundo somente após
+300 ms de silêncio estável, limita o limiar entre 700 e 1000 e o congela
+durante a sequência. Exige ataque em até 25 ms após o silêncio, queda de
+amplitude sustentada por 12 ms e duração de até aproximadamente 120 ms.
+O intervalo entre inícios de palmas deve ficar entre 120 e 600 ms. Esses
+critérios temporais ainda podem aceitar outros impactos e sílabas curtas;
+a saturação sinalizada por `clip` precisa ser avaliada também no ganho do MAX4466.
+
+Para executar os testes sintéticos no computador (requer `g++`):
+
+```bash
+g++ -std=c++11 -Wall -Wextra -Werror -Iinclude test/test_palmas/test_detector.cpp -o /tmp/test_detector_palmas
+/tmp/test_detector_palmas
+```
+
+Os testes verificam contagem e temporização; não medem precisão acústica.
+O log anterior agrega picos em 100 ms e não permite reconstruir os pulsos
+originais para comparar a precisão das versões.
+
+Para calibrar, registre silêncio, fala sem palmas, palmas isoladas e pares
+com intervalo de 200–400 ms; anote o momento de cada teste para comparar
+com os logs. Feche o monitor serial antes de gravar outro firmware.
