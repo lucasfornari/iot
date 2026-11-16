@@ -4,6 +4,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "detector_palmas.h"
+#include "analise_microfone.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -45,24 +46,28 @@ struct JanelaMic {
   uint32_t tempo;
   uint32_t sequencia;
   int vpp;
+  int textura;
   bool saturada;
 };
 QueueHandle_t filaMic;
 DetectorPalmas detector;
+bool capturandoMic = false;
+uint32_t inicioCapturaMic = 0;
 
 void amostrarMicrofone(void *) {
   uint32_t sequencia = 0;
   for (;;) {
-    int minimo = 4095, maximo = 0;
+    AnaliseMicrofone analise;
     uint32_t inicio = micros();
+    uint32_t proxima = inicio;
     while (uint32_t(micros() - inicio) < 4000) {
-      int leitura = analogRead(PINO_MIC);
-      if (leitura < minimo) minimo = leitura;
-      if (leitura > maximo) maximo = leitura;
-      delayMicroseconds(50);
+      uint32_t agora = micros();
+      if (int32_t(agora - proxima) < 0) continue;
+      analise.adicionar(analogRead(PINO_MIC));
+      proxima = agora + 125; // Cerca de 8 kHz durante cada janela de 4 ms.
     }
-    JanelaMic janela{millis(), sequencia++, maximo - minimo,
-                      minimo <= 5 || maximo >= 4090};
+    JanelaMic janela{millis(), sequencia++, analise.vpp(), analise.textura(),
+                      analise.saturada()};
     // Sem bloqueio: uma perda fica identificável pelo número de sequência.
     xQueueSend(filaMic, &janela, 0);
     vTaskDelay(1);  // Cede CPU ao sistema entre janelas de 4 ms.
@@ -180,11 +185,27 @@ void setup() {
 
 void loop() {
   unsigned long agora = millis();
+  // Diagnóstico opcional por janela, sem alterar a aquisição ou a detecção.
+  while (Serial.available()) {
+    char comando = Serial.read();
+    if (comando == 'c') {
+      capturandoMic = true;
+      inicioCapturaMic = agora;
+      Serial.println("[CAPTURA] 180s: J,tempo,sequencia,vpp,textura,clip,acao");
+    } else if (comando == 'x') {
+      capturandoMic = false;
+      Serial.println("[CAPTURA] encerrada");
+    }
+  }
+  if (capturandoMic && agora - inicioCapturaMic >= 180000) {
+    capturandoMic = false;
+    Serial.println("[CAPTURA] encerrada");
+  }
 
   static uint32_t ultimoLog = 0, ultimaJanela = 0, ultimaSequencia = 0;
   static uint32_t maiorIntervalo = 0, perdidas = 0;
   static bool recebeuJanela = false;
-  static int picoLog = 0, saturadas = 0, janelas = 0;
+  static int picoLog = 0, texturaLog = 0, saturadas = 0, janelas = 0;
   JanelaMic janela;
   while (xQueueReceive(filaMic, &janela, 0) == pdTRUE) {
     if (recebeuJanela) {
@@ -201,35 +222,46 @@ void loop() {
     recebeuJanela = true;
     ultimaJanela = janela.tempo;
     ultimaSequencia = janela.sequencia;
-    auto resultado = detector.processar(janela.vpp, janela.tempo);
+    auto resultado = detector.processar(janela.vpp, janela.textura, janela.tempo);
+    if (capturandoMic) {
+      Serial.printf("J,%lu,%lu,%d,%d,%d,%d\n", janela.tempo, janela.sequencia,
+                    janela.vpp, janela.textura, janela.saturada, resultado.acao);
+    }
     if (resultado.inicio) {
-      Serial.printf("[INICIO] t=%lu vpp=%d limiar=%.0f\n",
-                    janela.tempo, janela.vpp, detector.limiar);
+      Serial.printf("[INICIO] t=%lu vpp=%d textura=%d limiar=%.0f\n",
+                    janela.tempo, janela.vpp, janela.textura, detector.limiar);
     }
     if (resultado.aceito) {
-      Serial.printf("[SOM] t=%lu pico=%d duracao=%lu contagem=%d\n",
-                    janela.tempo, detector.pico, resultado.duracao, detector.contagem);
+      Serial.printf("[SOM] t=%lu pico=%d textura=%d duracao=%lu contagem=%d\n",
+                    janela.tempo, detector.pico, detector.texturaPico,
+                    resultado.duracao, detector.contagem);
     }
     if (resultado.rejeitado) {
-      Serial.printf("[REJEITADO] t=%lu motivo=longo pico=%d duracao=%lu\n",
-                    janela.tempo, detector.pico, resultado.duracao);
+      Serial.printf("[REJEITADO] t=%lu motivo=%s pico=%d textura=%d duracao=%lu\n",
+                    janela.tempo,
+                    resultado.motivo == DetectorPalmas::Resultado::SOM_LONGO ? "longo" :
+                    (resultado.motivo == DetectorPalmas::Resultado::SOM_TONAL ? "tonal" : "fraco"),
+                    detector.pico, detector.texturaPico, resultado.duracao);
     }
     if (resultado.acao) {
       estadoAtual = resultado.acao == 1 ? ESTADO_TEMPERATURA : ESTADO_UMIDADE;
       tempoInicioExibicao = agora;
       Serial.printf("[ACAO] t=%lu palmas=%d\n", janela.tempo, resultado.acao);
     }
-    picoLog = max(picoLog, janela.vpp);
+    if (janela.vpp >= picoLog) {
+      picoLog = janela.vpp;
+      texturaLog = janela.textura;
+    }
     saturadas += janela.saturada;
     janelas++;
   }
   if (agora - ultimoLog >= 100 && janelas) {
-    Serial.printf("[MIC] t=%lu pico=%d fundo=%.0f limiar=%.0f armado=%d pulso=%d contagem=%d n=%d clip=%d gap=%lu perdidas=%lu\n",
-                  ultimaJanela, picoLog, detector.fundo, detector.limiar,
+    Serial.printf("[MIC] t=%lu pico=%d textura=%d fundo=%.0f limiar=%.0f armado=%d pulso=%d contagem=%d n=%d clip=%d gap=%lu perdidas=%lu\n",
+                  ultimaJanela, picoLog, texturaLog, detector.fundo, detector.limiar,
                   detector.armado, detector.pulso, detector.contagem,
                   janelas, saturadas, maiorIntervalo, perdidas);
     ultimoLog = agora;
-    picoLog = saturadas = janelas = 0;
+    picoLog = texturaLog = saturadas = janelas = 0;
     maiorIntervalo = perdidas = 0;
   }
 

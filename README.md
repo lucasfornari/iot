@@ -63,28 +63,38 @@ Ao detectar dois pulsos sonoros consecutivos dentro da janela de confirmação, 
 
 ## ⚙️ Ajuste de Sensibilidade do Microfone
 
-A sensibilidade pode ser calibrada de duas maneiras:
+A detecção considera volume relativo ao ambiente, ataque rápido, variação
+entre amostras e decaimento. Não calcula pitch: a medida `textura` ajuda a
+rejeitar sinais de variação suave, mas não identifica a origem de um som.
 
-1. **Via Código (`src/main.cpp`):**
-   * Ajuste o valor da constante `LIMIAR_PALMA_VPP`:
-     * `850 - 1050`: Sensibilidade mais alta (capta sons leves a moderados).
-     * `1100 - 1400`: Sensibilidade balanceada (recomendada para quartos/salas).
-     * `1500+`: Exige palmas mais fortes ou próximas ao microfone.
+1. **Via Código (`include/detector_palmas.h`):**
+   * `LIMIAR_MINIMO = 700` define o volume mínimo. O limiar efetivo acompanha
+     o fundo com fator 2,5 e fica entre 700 e 3500 unidades do ADC.
+   * `PICO_MINIMO = 2800` confirma que o pulso chegou ao volume esperado de
+     uma palma próxima. Foi calibrado com este MAX4466; palmas fracas ou
+     distantes podem ser descartadas. Reavalie esse valor ao alterar o ganho.
+   * `TEXTURA_MINIMA = 800` exige variação rápida no ataque. Aumentar esse
+     valor torna o filtro mais restritivo e também pode rejeitar palmas.
+   * O detector calibra durante o primeiro segundo; mantenha o ambiente
+     representativo do uso, sem bater palmas nesse intervalo.
 2. **Via Hardware (Trimpot do MAX4466):**
    * O trimpot na parte traseira da placa do MAX4466 regula o ganho de 25x a 125x:
-     * **Sentido anti-horário:** diminui o ganho (menos sensível).
-     * **Sentido horário:** aumenta o ganho (mais sensível).
+     * Ajuste aos poucos, comparando `pico`, `fundo` e `clip` na serial.
+     * Se `clip` ocorrer frequentemente durante fala ou ruído ambiente,
+       reduza o ganho. Aumentar o volume não recupera detalhes já saturados.
 
 ---
 
 ## 📁 Estrutura do Repositório
 
 * **`src/main.cpp`**: Firmware principal em C++ (PlatformIO / Arduino Core):
-  * Amostragem contínua do microfone na GPIO34 (janela de 25 ms com medição de pico a pico `Vpp`).
+  * Aquisição do microfone na GPIO34 em tarefa separada, com janelas de 4 ms e aproximadamente 8 kHz dentro de cada janela.
   * Máquina de estados para contagem de palmas e temporizador de retorno ao standby.
-  * Leitura não-bloqueante do DHT11 a cada 2 segundos.
+  * Leitura do DHT11 a cada 2 segundos, enquanto a tarefa do microfone continua.
   * Renderização visual no display SSD1306.
 * **`platformio.ini`**: Configurações de compilação e dependências das bibliotecas Adafruit.
+* **`include/analise_microfone.h`**: Extração de Vpp, saturação e textura a partir das amostras do ADC.
+* **`include/detector_palmas.h`**: Detecção e contagem temporal de palmas.
 * **`data/`**: Interface web estática complementar.
 * **`backend/`**: Servidor complementar em Python com SQLite para histórico.
 * **`mqtt/`**: Configurações adicionais de broker MQTT via Docker Compose.
@@ -110,7 +120,7 @@ de clima, sem níveis ou limiares. Nas telas de temperatura e umidade, a
 barra inferior mostra o tempo restante até o standby (5 s).
 
 A serial a 115200 baud publica `[MIC]` a cada aproximadamente 100 ms:
-`pico`, `fundo`, `limiar`, `armado`, `pulso`, `contagem`,
+`pico`, `textura` (da janela de maior pico), `fundo`, `limiar`, `armado`, `pulso`, `contagem`,
 `n` (janelas amostradas), `clip` (janelas próximas dos limites do ADC) e
 `gap` (maior intervalo em ms entre janelas) e `perdidas` (janelas descartadas
 por fila cheia). `[INICIO]`, `[SOM]`, `[REJEITADO]`, `[ACAO]` e `[LACUNA]`
@@ -118,16 +128,40 @@ ajudam a rastrear a decisão. A leitura do ADC ocorre em uma tarefa separada,
 com janelas de 4 ms e uma pausa de um tick entre elas; a fila comporta
 64 janelas. Lacunas acima de 25 ms ou perdas cancelam a sequência pendente.
 
-O detector em `include/detector_palmas.h` aprende o fundo somente após
-300 ms de silêncio estável, limita o limiar entre 700 e 1000 e o congela
-durante a sequência. Exige ataque em até 25 ms após o silêncio, queda de
-amplitude sustentada por 12 ms e duração de até aproximadamente 120 ms.
+Para registrar as características de todas as janelas do MAX4466,
+envie `c` pelo monitor serial. Durante três minutos, o firmware acrescenta
+linhas CSV `J,tempo,sequencia,vpp,textura,clip,acao`; envie `x` para encerrar
+antes. Salve a saída serial para analisar as decisões do detector. Esse
+registro contém medidas do sinal, sem áudio reproduzível, e mantém a
+detecção e o OLED funcionando.
+
+O detector aprende o fundo fora de pulsos, da pausa entre duas palmas e
+dos bloqueios após uma dupla ou um candidato rejeitado. Assim consegue rearmar mesmo com ruído
+constante acima do antigo teto fixo de silêncio. O limiar fica congelado
+durante a sequência para uma primeira palma forte não dificultar a segunda.
+
+O ataque precisa superar o limiar, crescer pelo menos 1,8 vez em relação
+à janela anterior e começar em até 15 ms após o nível de repouso. A textura
+é avaliada nos primeiros 12 ms do pulso. O som deve começar a cair antes
+de 70 ms e permanecer abaixo do nível de retorno por 15 ms; pulsos que
+atingem 100 ms são descartados. O nível de retorno considera o fundo e
+40% do pico, permitindo a cauda de uma palma forte. Essa tolerância também
+é verificada com envelopes registrados no MAX4466 durante a calibração.
+
 O intervalo entre inícios de palmas deve ficar entre 80 e 600 ms, com
-silêncio suficiente para rearmar o detector. A umidade aparece assim que
+20 ms de repouso relativo ao ambiente para rearmar o detector. A umidade aparece assim que
 a segunda palma é validada; uma palma isolada aguarda 600 ms para confirmar
-a temperatura. Esses
-critérios temporais ainda podem aceitar outros impactos e sílabas curtas;
-a saturação sinalizada por `clip` precisa ser avaliada também no ganho do MAX4466.
+a temperatura. Após uma dupla, há 180 ms de bloqueio contra ecos; após um
+candidato rejeitado, 80 ms evitam rearmar no meio da mesma rajada de ruído.
+Um candidato inválido não apaga uma palma já confirmada. Novos
+comandos continuam sendo aceitos enquanto uma leitura está no OLED e
+reiniciam os cinco segundos de exibição.
+
+`[REJEITADO] motivo=longo` indica duração excessiva; `motivo=tonal` indica
+textura insuficiente no ataque; `motivo=fraco` indica pico abaixo de 2800.
+Esses filtros ainda podem aceitar outros
+impactos ou certos sons de fala. A saturação sinalizada por `clip` precisa
+ser avaliada também no ganho do MAX4466.
 
 Para executar os testes sintéticos no computador (requer `g++`):
 
@@ -136,9 +170,11 @@ g++ -std=c++11 -Wall -Wextra -Werror -Iinclude test/test_palmas/test_detector.cp
 /tmp/test_detector_palmas
 ```
 
-Os testes verificam contagem e temporização; não medem precisão acústica.
-O log anterior agrega picos em 100 ms e não permite reconstruir os pulsos
-originais para comparar a precisão das versões.
+Os testes verificam extração do sinal, contagem, temporização, ruído de
+fundo elevado, sinal tonal sintético, cauda forte, recuperação, ecos,
+lacunas e overflow do relógio. Não medem precisão acústica com vozes e
+palmas reais. Os logs agregados em 100 ms não permitem reconstruir as
+amostras originais para comparar a precisão das versões.
 
 Para calibrar, registre silêncio, fala sem palmas, palmas isoladas e pares
 com intervalo de 200–400 ms; anote o momento de cada teste para comparar
