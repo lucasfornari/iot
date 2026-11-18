@@ -12,7 +12,10 @@ CHAVES = [
     "SINRIC_APP_KEY",
     "SINRIC_APP_SECRET",
     "SINRIC_DEVICE_ID",
+    "SINRIC_DEVICE_ID_UMIDADE",
+    "SINRIC_INSTANCIA_UMIDADE",
 ]
+OPCIONAIS = {"WIFI_SENHA", "SINRIC_DEVICE_ID_UMIDADE", "SINRIC_INSTANCIA_UMIDADE"}
 
 
 def ler_env(caminho):
@@ -42,7 +45,7 @@ faltando = []
 definicoes = []
 for chave in CHAVES:
     valor = os.environ.get(chave) or valores.get(chave, "")
-    if not valor and chave != "WIFI_SENHA":
+    if not valor and chave not in OPCIONAIS:
         faltando.append(chave)
     definicoes.append((chave, env.StringifyMacro(valor)))  # noqa: F821
 

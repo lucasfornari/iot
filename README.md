@@ -51,6 +51,15 @@ Preencha `WIFI_SSID`, `WIFI_SENHA` (rede **2.4 GHz**), `SINRIC_APP_KEY`,
 com o mesmo nome têm prioridade sobre o `.env`. Evite `\` e `"` na senha do Wi-Fi
 (o repasse como macro não escapa esses caracteres).
 
+### Umidade pela Alexa (opcional)
+A Alexa não responde umidade do *Temperature Sensor*. Para isso:
+1. No portal, crie um **Device Template** com uma capability **Range** chamada
+   "Umidade" (0–100, %), e um dispositivo a partir dele.
+2. No `.env`, preencha `SINRIC_DEVICE_ID_UMIDADE` e `SINRIC_INSTANCIA_UMIDADE`
+   (ID da instância no código gerado pelo portal; padrão `rangeInstance1`).
+3. O firmware envia a umidade para esse dispositivo junto com a temperatura.
+   O valor é somente leitura: ajustes vindos da Alexa são recusados.
+
 ### 3. Plataforma
 O SinricPro 5.x exige **Arduino core 3.x**. Por isso o `platformio.ini` usa a
 plataforma [pioarduino](https://github.com/pioarduino/platform-espressif32)
@@ -62,7 +71,7 @@ novo toolchain (pode demorar alguns minutos).
   `Alexa:OK/--/CFG` (`CFG` = credenciais do Sinric ausentes no `.env`).
 * Envio ao Sinric: logo ao conectar; depois quando a temperatura variar ≥ 0,5 °C
   ou a umidade ≥ 2 %, ou a cada 5 min. O Sinric limita eventos de sensor a
-  1 por minuto, e o firmware respeita esse limite.
+  1 por minuto; o firmware espera 65 s entre envios.
 * Wi-Fi e Sinric reconectam sozinhos; sem rede, o OLED continua funcionando.
 * Exemplos de comando: *"Alexa, qual a temperatura do Sensor?"* (use o nome
   dado ao dispositivo no Sinric).
