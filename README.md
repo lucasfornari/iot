@@ -1,8 +1,12 @@
-# Monitor de Clima Interno com Controle Acústico (ESP32, MAX4466 e OLED)
+# Monitor de Clima Interno com Alexa (ESP32, DHT11, OLED e Sinric Pro)
 
-Projeto de IoT para monitoramento de **temperatura e umidade** em tempo real com controle de interface ativado por **palmas ou estalos sonoros**, utilizando microcontrolador **ESP32**, sensor **DHT11**, microfone analógico **MAX4466** e **Display OLED I2C (SSD1306)**.
+Projeto de IoT para monitoramento de **temperatura e umidade** com sensor **DHT11**,
+**Display OLED I2C (SSD1306)** e integração com a **Alexa** via **Sinric Pro**.
 
-O firmware opera de forma autônoma e offline, com amostragem contínua de áudio, filtragem contra repiques (debounce acústico) e leitura periódica dos sensores climáticos em segundo plano.
+O firmware atual (`src/main.cpp`) lê o DHT11 a cada 2 s, mostra os valores no OLED
+e publica temperatura e umidade em um dispositivo *Temperature Sensor* do Sinric Pro.
+O controle por palmas com o microfone **MAX4466** foi arquivado em
+`extras/firmware_palmas/` (código e testes preservados, fora da compilação).
 
 ---
 
@@ -24,6 +28,56 @@ O firmware opera de forma autônoma e offline, com amostragem contínua de áudi
 > **Nota I2C:** Endereço padrão da tela OLED: `0x3C`.
 
 ---
+
+## 🗣️ Alexa via Sinric Pro
+
+### 1. Sinric Pro
+1. Crie uma conta em [sinric.pro](https://sinric.pro) e entre no portal.
+2. Em **Devices > Add Device**, crie um dispositivo do tipo **Temperature Sensor**.
+3. Anote o **Device ID** e, em **Credentials**, o **App Key** e o **App Secret**.
+4. No app Alexa, ative a skill **Sinric Pro**, vincule a conta e descubra dispositivos.
+
+### 2. Credenciais (`.env`)
+O ESP32 não lê `.env` em tempo de execução. O script `scripts/carregar_env.py`
+lê o `.env` durante o `pio run` e repassa os valores como macros de compilação.
+O `.env` está no `.gitignore`; nunca coloque credenciais em `include/credenciais.h`.
+
+```bash
+cp .env.exemplo .env
+```
+
+Preencha `WIFI_SSID`, `WIFI_SENHA` (rede **2.4 GHz**), `SINRIC_APP_KEY`,
+`SINRIC_APP_SECRET` e `SINRIC_DEVICE_ID`. Variáveis de ambiente do sistema
+com o mesmo nome têm prioridade sobre o `.env`. Evite `\` e `"` na senha do Wi-Fi
+(o repasse como macro não escapa esses caracteres).
+
+### 3. Plataforma
+O SinricPro 5.x exige **Arduino core 3.x**. Por isso o `platformio.ini` usa a
+plataforma [pioarduino](https://github.com/pioarduino/platform-espressif32)
+em vez da `espressif32` oficial. Na primeira compilação o PlatformIO baixa o
+novo toolchain (pode demorar alguns minutos).
+
+### 4. Funcionamento
+* O OLED mostra temperatura (grande), umidade e o status `WiFi:OK/--` e
+  `Alexa:OK/--/CFG` (`CFG` = credenciais do Sinric ausentes no `.env`).
+* Envio ao Sinric: logo ao conectar; depois quando a temperatura variar ≥ 0,5 °C
+  ou a umidade ≥ 2 %, ou a cada 5 min. O Sinric limita eventos de sensor a
+  1 por minuto, e o firmware respeita esse limite.
+* Wi-Fi e Sinric reconectam sozinhos; sem rede, o OLED continua funcionando.
+* Exemplos de comando: *"Alexa, qual a temperatura do Sensor?"* (use o nome
+  dado ao dispositivo no Sinric).
+
+### 5. Teste em hardware
+1. `pio run -t upload` e `pio device monitor`.
+2. Verifique na serial: `[WIFI] Conectado`, `[SINRIC] Conectado` e `[SINRIC] Enviado: ...`.
+3. Confira o valor no portal Sinric e pergunte à Alexa.
+
+---
+
+## 🎙️ Firmware de palmas (arquivado)
+
+As seções abaixo descrevem o firmware de palmas em `extras/firmware_palmas/main.cpp`.
+Veja `extras/firmware_palmas/README.md` para reativá-lo.
 
 ## 📱 Estados da Interface e Funcionamento
 
@@ -87,7 +141,10 @@ rejeitar sinais de variação suave, mas não identifica a origem de um som.
 
 ## 📁 Estrutura do Repositório
 
-* **`src/main.cpp`**: Firmware principal em C++ (PlatformIO / Arduino Core):
+* **`src/main.cpp`**: Firmware atual: DHT11, OLED, Wi-Fi e Sinric Pro (Alexa).
+* **`scripts/carregar_env.py`**: Lê o `.env` e injeta as credenciais na compilação.
+* **`.env.exemplo`**: Modelo do `.env` (credenciais locais, fora do git).
+* **`extras/firmware_palmas/main.cpp`**: Firmware de palmas arquivado (fora da compilação):
   * Aquisição do microfone na GPIO34 em tarefa separada, com janelas de 4 ms e aproximadamente 8 kHz dentro de cada janela.
   * Máquina de estados para contagem de palmas e temporizador de retorno ao standby.
   * Leitura do DHT11 a cada 2 segundos, enquanto a tarefa do microfone continua.
@@ -103,12 +160,13 @@ rejeitar sinais de variação suave, mas não identifica a origem de um som.
 
 ## 🚀 Como Compilar e Gravar
 
-1. Conecte o ESP32 ao computador via USB.
-2. Compile e envie o firmware utilizando o PlatformIO CLI:
+1. Crie e preencha o `.env` (veja a seção Alexa via Sinric Pro).
+2. Conecte o ESP32 ao computador via USB.
+3. Compile e envie o firmware utilizando o PlatformIO CLI:
    ```bash
    pio run -t upload
    ```
-3. Para acompanhar o log de eventos e depuração do microfone via monitor serial (115200 baud):
+4. Para acompanhar o log de eventos e depuração do microfone via monitor serial (115200 baud):
    ```bash
    pio device monitor
    ```

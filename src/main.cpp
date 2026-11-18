@@ -1,78 +1,54 @@
+// Firmware Clima Interno + Alexa (Sinric Pro)
+// ESP32 + DHT11 + OLED SSD1306. Publica temperatura/umidade no Sinric Pro,
+// que expõe o sensor para a Alexa. O controle por palmas (MAX4466) está
+// preservado em extras/firmware_palmas/ e fora desta compilação.
+
 #include <Arduino.h>
+#include <WiFi.h>
 #include <Wire.h>
 #include <DHT.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "detector_palmas.h"
-#include "analise_microfone.h"
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
+#include <SinricPro.h>
+#include <SinricProTemperaturesensor.h>
+#include "credenciais.h"
 
 // ---------- Configurações de Hardware ----------
 #define PINO_SENSOR_DHT     13
 #define TIPO_SENSOR_DHT     DHT11
 #define PINO_I2C_SDA        21
 #define PINO_I2C_SCL        22
-#define PINO_MIC            34
 #define LARGURA_TELA_OLED   128
 #define ALTURA_TELA_OLED    64
 #define ENDERECO_TELA_OLED  0x3C
 
-// ---------- Configurações de Detecção Sonora (Palmas/Estalos) ----------
-const unsigned long TEMPO_EXIBICAO = 5000;  // Tempo de exibição da tela antes de voltar ao standby (5s)
+// ---------- Temporização ----------
+const unsigned long INTERVALO_DHT = 2000;          // DHT11 aceita 1 leitura/s; 2 s dá folga
+const unsigned long INTERVALO_TELA = 500;
+const unsigned long INTERVALO_MIN_EVENTO = 60000;  // Limite do Sinric para eventos de sensor
+const unsigned long INTERVALO_MAX_EVENTO = 300000; // Reenvia a cada 5 min mesmo sem mudança
+const unsigned long TIMEOUT_WIFI_SETUP = 15000;    // Espera inicial; depois reconecta em segundo plano
 
-// ---------- Estados da Tela ----------
-enum EstadoTela {
-  ESTADO_STANDBY,
-  ESTADO_TEMPERATURA,
-  ESTADO_UMIDADE
-};
+// Variação mínima para antecipar um envio (resolução do DHT11 é 1 °C / 1 %).
+const float DELTA_TEMPERATURA = 0.5;
+const float DELTA_UMIDADE = 2.0;
 
 // ---------- Instâncias Globais ----------
 DHT sensorDht(PINO_SENSOR_DHT, TIPO_SENSOR_DHT);
 Adafruit_SSD1306 telaOled(LARGURA_TELA_OLED, ALTURA_TELA_OLED, &Wire, -1);
+bool telaDisponivel = false;
 
-EstadoTela estadoAtual = ESTADO_STANDBY;
-
-float temperaturaAtual = 0.0;
-float umidadeAtual = 0.0;
+float temperaturaAtual = NAN;
+float umidadeAtual = NAN;
 unsigned long tempoUltimoDHT = 0;
 
-unsigned long tempoInicioExibicao = 0;
+float temperaturaEnviada = NAN;
+float umidadeEnviada = NAN;
+unsigned long tempoUltimoEvento = 0;
+bool enviarAgora = true;  // Primeiro envio assim que conectar ao Sinric
 
-// Aquisição separada: OLED/serial/DHT não suspendem o leitor do ADC.
-struct JanelaMic {
-  uint32_t tempo;
-  uint32_t sequencia;
-  int vpp;
-  int textura;
-  bool saturada;
-};
-QueueHandle_t filaMic;
-DetectorPalmas detector;
-bool capturandoMic = false;
-uint32_t inicioCapturaMic = 0;
-
-void amostrarMicrofone(void *) {
-  uint32_t sequencia = 0;
-  for (;;) {
-    AnaliseMicrofone analise;
-    uint32_t inicio = micros();
-    uint32_t proxima = inicio;
-    while (uint32_t(micros() - inicio) < 4000) {
-      uint32_t agora = micros();
-      if (int32_t(agora - proxima) < 0) continue;
-      analise.adicionar(analogRead(PINO_MIC));
-      proxima = agora + 125; // Cerca de 8 kHz durante cada janela de 4 ms.
-    }
-    JanelaMic janela{millis(), sequencia++, analise.vpp(), analise.textura(),
-                      analise.saturada()};
-    // Sem bloqueio: uma perda fica identificável pelo número de sequência.
-    xQueueSend(filaMic, &janela, 0);
-    vTaskDelay(1);  // Cede CPU ao sistema entre janelas de 4 ms.
-  }
-}
+bool credenciaisSinricOk = false;
+bool sinricConectado = false;
 
 // ---------- Interface OLED bicolor ----------
 // A cor é física: linhas 0–15 amarelas, linhas 16–63 azuis.
@@ -93,201 +69,196 @@ void desenharCabecalho() {
   telaOled.setTextWrap(false);
   telaOled.setTextColor(SSD1306_WHITE);
   desenharTextoCentralizado("CLIMA INTERNO", 4, 1);
-  // Separador já na área azul; deixa a divisão das cores respirar.
   telaOled.drawFastHLine(8, ALTURA_FAIXA_AMARELA + 1, 112, SSD1306_WHITE);
 }
 
-void desenharStandby() {
+void desenharMensagem(const char *linha1, const char *linha2) {
+  if (!telaDisponivel) return;
   desenharCabecalho();
-
-  // Símbolo climático inteiramente na área azul, ao lado do estado.
-  telaOled.drawCircle(15, 27, 5, SSD1306_WHITE);
-  telaOled.drawFastVLine(15, 19, 2, SSD1306_WHITE);
-  telaOled.drawFastHLine(6, 27, 2, SSD1306_WHITE);
-  telaOled.drawFastHLine(22, 27, 2, SSD1306_WHITE);
-  telaOled.fillCircle(17, 34, 4, SSD1306_WHITE);
-  telaOled.fillCircle(23, 31, 5, SSD1306_WHITE);
-  telaOled.fillCircle(29, 35, 4, SSD1306_WHITE);
-  telaOled.fillRect(17, 34, 13, 5, SSD1306_WHITE);
-
-  telaOled.setTextSize(2);
-  telaOled.setCursor(45, 25);
-  telaOled.print("PRONTO");
-  desenharTextoCentralizado("1 palma: temperatura", 45, 1);
-  desenharTextoCentralizado("2 palmas: umidade", 56, 1);
+  desenharTextoCentralizado(linha1, 28, 1);
+  desenharTextoCentralizado(linha2, 42, 1);
   telaOled.display();
 }
 
-void desenharLeitura(const char *titulo, const char *valor) {
-  desenharCabecalho();
-  desenharTextoCentralizado(titulo, 21, 1);
-  desenharTextoCentralizado(valor, 34, 2);
+const char *textoStatusWifi() {
+  return WiFi.status() == WL_CONNECTED ? "OK" : "--";
+}
 
-  // Progresso discreto na área azul; esvazia em cinco segundos.
-  unsigned long decorrido = millis() - tempoInicioExibicao;
-  unsigned long restante = decorrido >= TEMPO_EXIBICAO ? 0 : TEMPO_EXIBICAO - decorrido;
-  int largura = (restante * 110UL) / TEMPO_EXIBICAO;
-  telaOled.drawRoundRect(8, 57, 112, 5, 2, SSD1306_WHITE);
-  if (largura > 0) telaOled.fillRect(9, 58, largura, 3, SSD1306_WHITE);
+const char *textoStatusAlexa() {
+  if (!credenciaisSinricOk) return "CFG";
+  return sinricConectado ? "OK" : "--";
+}
+
+void desenharPainel() {
+  if (!telaDisponivel) return;
+  desenharCabecalho();
+
+  char texto[24];
+  // "\xF7" é o símbolo de grau na fonte cp437 da Adafruit GFX.
+  if (isnan(temperaturaAtual)) {
+    snprintf(texto, sizeof(texto), "--.- " "\xF7" "C");
+  } else {
+    snprintf(texto, sizeof(texto), "%.1f " "\xF7" "C", temperaturaAtual);
+  }
+  desenharTextoCentralizado(texto, 22, 2);
+
+  if (isnan(umidadeAtual)) {
+    snprintf(texto, sizeof(texto), "Umidade: -- %%");
+  } else {
+    snprintf(texto, sizeof(texto), "Umidade: %.0f %%", umidadeAtual);
+  }
+  desenharTextoCentralizado(texto, 42, 1);
+
+  snprintf(texto, sizeof(texto), "WiFi:%s  Alexa:%s", textoStatusWifi(), textoStatusAlexa());
+  desenharTextoCentralizado(texto, 55, 1);
   telaOled.display();
 }
 
-void desenharTemperatura(float temp) {
-  char valor[20];
-  snprintf(valor, sizeof(valor), "%.1f C", temp);
-  desenharLeitura("TEMPERATURA", valor);
+// ---------- Wi-Fi ----------
+void iniciarWifi() {
+  if (strlen(WIFI_SSID) == 0) {
+    Serial.println("[WIFI] WIFI_SSID vazio: preencha o arquivo .env");
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);         // Recomendação do Sinric: evita quedas do WebSocket
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_SENHA);
+
+  Serial.printf("[WIFI] Conectando a \"%s\"", WIFI_SSID);
+  desenharMensagem("Conectando WiFi...", WIFI_SSID);
+  unsigned long inicio = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - inicio < TIMEOUT_WIFI_SETUP) {
+    Serial.print(".");
+    delay(250);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf(" ok! IP %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println(" sem resposta; seguindo offline e tentando em segundo plano.");
+  }
 }
 
-void desenharUmidade(float umid) {
-  char valor[20];
-  snprintf(valor, sizeof(valor), "%.0f %%", umid);
-  desenharLeitura("UMIDADE", valor);
+// ---------- Sinric Pro ----------
+void iniciarSinric() {
+  credenciaisSinricOk = strlen(SINRIC_APP_KEY) > 0 && strlen(SINRIC_APP_SECRET) > 0 &&
+                        strlen(SINRIC_DEVICE_ID) > 0;
+  if (!credenciaisSinricOk) {
+    Serial.println("[SINRIC] Credenciais ausentes no .env; Alexa desativada.");
+    return;
+  }
+
+  // A conversão para referência é o que cria/registra o dispositivo no SDK.
+  SinricProTemperaturesensor &sensor = SinricPro[SINRIC_DEVICE_ID];
+  (void)sensor;
+  SinricPro.onConnected([]() {
+    sinricConectado = true;
+    enviarAgora = true;  // Atualiza a Alexa logo após (re)conectar
+    Serial.println("[SINRIC] Conectado");
+  });
+  SinricPro.onDisconnected([]() {
+    sinricConectado = false;
+    Serial.println("[SINRIC] Desconectado");
+  });
+  SinricPro.begin(SINRIC_APP_KEY, SINRIC_APP_SECRET);
+}
+
+void enviarLeituraSinric() {
+  if (!credenciaisSinricOk || !sinricConectado) return;
+  if (isnan(temperaturaAtual) || isnan(umidadeAtual)) return;
+
+  unsigned long agora = millis();
+  unsigned long decorrido = agora - tempoUltimoEvento;
+  // O próprio SDK descarta eventos com menos de 60 s; não gasta a tentativa.
+  if (tempoUltimoEvento != 0 && decorrido < INTERVALO_MIN_EVENTO) return;
+
+  bool mudou = isnan(temperaturaEnviada) ||
+               fabsf(temperaturaAtual - temperaturaEnviada) >= DELTA_TEMPERATURA ||
+               fabsf(umidadeAtual - umidadeEnviada) >= DELTA_UMIDADE;
+  if (!enviarAgora && !mudou && decorrido < INTERVALO_MAX_EVENTO) return;
+
+  SinricProTemperaturesensor &sensor = SinricPro[SINRIC_DEVICE_ID];
+  bool ok = sensor.sendTemperatureEvent(temperaturaAtual, umidadeAtual);
+  tempoUltimoEvento = agora == 0 ? 1 : agora;
+  enviarAgora = false;
+  if (ok) {
+    temperaturaEnviada = temperaturaAtual;
+    umidadeEnviada = umidadeAtual;
+    Serial.printf("[SINRIC] Enviado: %.1f C, %.0f %%\n", temperaturaAtual, umidadeAtual);
+  } else {
+    Serial.println("[SINRIC] Falha ao enviar evento (nova tentativa em 60 s)");
+  }
+}
+
+// ---------- DHT11 ----------
+void lerSensor() {
+  float t = sensorDht.readTemperature();
+  float u = sensorDht.readHumidity();
+  if (isnan(t) || isnan(u)) {
+    Serial.println("[DHT] Falha na leitura");
+    return;
+  }
+  temperaturaAtual = t;
+  umidadeAtual = u;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
 
-  analogSetAttenuation(ADC_11db);
-  pinMode(PINO_MIC, INPUT);
-
-  // Inicializa barramento I2C e tela OLED
   Wire.begin(PINO_I2C_SDA, PINO_I2C_SCL);
   Wire.setClock(400000);
-  if (telaOled.begin(SSD1306_SWITCHCAPVCC, ENDERECO_TELA_OLED)) {
-    desenharStandby();
+  telaDisponivel = telaOled.begin(SSD1306_SWITCHCAPVCC, ENDERECO_TELA_OLED);
+  if (telaDisponivel) {
+    telaOled.cp437(true);
+    desenharMensagem("Iniciando...", "");
   } else {
     Serial.println("Aviso: Falha ao inicializar display OLED.");
   }
 
   sensorDht.begin();
 
-  // Leitura inicial do sensor DHT11
-  delay(1000);
-  float t = sensorDht.readTemperature();
-  float u = sensorDht.readHumidity();
-  if (!isnan(t)) temperaturaAtual = t;
-  if (!isnan(u)) umidadeAtual = u;
+  Serial.println("==================================================");
+  Serial.println(" Clima Interno + Alexa (Sinric Pro)");
+  Serial.println(" - DHT11 lido a cada 2 s, exibido no OLED");
+  Serial.println(" - Envio ao Sinric ao mudar ou a cada 5 min (min. 60 s)");
+  Serial.println("==================================================");
 
-  Serial.println("==================================================");
-  Serial.println(" Sistema Clima Interno Ativo!");
-  Serial.println(" - 1 Palma  -> Exibe TEMPERATURA");
-  Serial.println(" - 2 Palmas -> Exibe UMIDADE");
-  Serial.println(" - Retorna automaticamente ao Standby apos 5s");
-  Serial.println("==================================================");
-  filaMic = xQueueCreate(64, sizeof(JanelaMic));
-  if (!filaMic || xTaskCreatePinnedToCore(amostrarMicrofone, "microfone", 3072,
-                                         nullptr, 2, nullptr, 0) != pdPASS) {
-    Serial.println("[ERRO] Falha ao iniciar aquisicao do microfone");
-    while (true) delay(1000);
-  }
+  iniciarWifi();
+  iniciarSinric();
+
+  delay(1000);  // DHT11 precisa de ~1 s após energizar
+  lerSensor();
+  tempoUltimoDHT = millis();
+  desenharPainel();
 }
 
 void loop() {
+  SinricPro.handle();
+
   unsigned long agora = millis();
-  // Diagnóstico opcional por janela, sem alterar a aquisição ou a detecção.
-  while (Serial.available()) {
-    char comando = Serial.read();
-    if (comando == 'c') {
-      capturandoMic = true;
-      inicioCapturaMic = agora;
-      Serial.println("[CAPTURA] 180s: J,tempo,sequencia,vpp,textura,clip,acao");
-    } else if (comando == 'x') {
-      capturandoMic = false;
-      Serial.println("[CAPTURA] encerrada");
-    }
-  }
-  if (capturandoMic && agora - inicioCapturaMic >= 180000) {
-    capturandoMic = false;
-    Serial.println("[CAPTURA] encerrada");
-  }
 
-  static uint32_t ultimoLog = 0, ultimaJanela = 0, ultimaSequencia = 0;
-  static uint32_t maiorIntervalo = 0, perdidas = 0;
-  static bool recebeuJanela = false;
-  static int picoLog = 0, texturaLog = 0, saturadas = 0, janelas = 0;
-  JanelaMic janela;
-  while (xQueueReceive(filaMic, &janela, 0) == pdTRUE) {
-    if (recebeuJanela) {
-      uint32_t intervalo = janela.tempo - ultimaJanela;
-      maiorIntervalo = max(maiorIntervalo, intervalo);
-      uint32_t faltantes = janela.sequencia - ultimaSequencia - 1;
-      if (faltantes || intervalo > 25) {
-        perdidas += faltantes;
-        detector.interromper();
-        Serial.printf("[LACUNA] t=%lu gap=%lu perdidas=%lu\n",
-                      janela.tempo, intervalo, faltantes);
-      }
-    }
-    recebeuJanela = true;
-    ultimaJanela = janela.tempo;
-    ultimaSequencia = janela.sequencia;
-    auto resultado = detector.processar(janela.vpp, janela.textura, janela.tempo);
-    if (capturandoMic) {
-      Serial.printf("J,%lu,%lu,%d,%d,%d,%d\n", janela.tempo, janela.sequencia,
-                    janela.vpp, janela.textura, janela.saturada, resultado.acao);
-    }
-    if (resultado.inicio) {
-      Serial.printf("[INICIO] t=%lu vpp=%d textura=%d limiar=%.0f\n",
-                    janela.tempo, janela.vpp, janela.textura, detector.limiar);
-    }
-    if (resultado.aceito) {
-      Serial.printf("[SOM] t=%lu pico=%d textura=%d duracao=%lu contagem=%d\n",
-                    janela.tempo, detector.pico, detector.texturaPico,
-                    resultado.duracao, detector.contagem);
-    }
-    if (resultado.rejeitado) {
-      Serial.printf("[REJEITADO] t=%lu motivo=%s pico=%d textura=%d duracao=%lu\n",
-                    janela.tempo,
-                    resultado.motivo == DetectorPalmas::Resultado::SOM_LONGO ? "longo" :
-                    (resultado.motivo == DetectorPalmas::Resultado::SOM_TONAL ? "tonal" : "fraco"),
-                    detector.pico, detector.texturaPico, resultado.duracao);
-    }
-    if (resultado.acao) {
-      estadoAtual = resultado.acao == 1 ? ESTADO_TEMPERATURA : ESTADO_UMIDADE;
-      tempoInicioExibicao = agora;
-      Serial.printf("[ACAO] t=%lu palmas=%d\n", janela.tempo, resultado.acao);
-    }
-    if (janela.vpp >= picoLog) {
-      picoLog = janela.vpp;
-      texturaLog = janela.textura;
-    }
-    saturadas += janela.saturada;
-    janelas++;
-  }
-  if (agora - ultimoLog >= 100 && janelas) {
-    Serial.printf("[MIC] t=%lu pico=%d textura=%d fundo=%.0f limiar=%.0f armado=%d pulso=%d contagem=%d n=%d clip=%d gap=%lu perdidas=%lu\n",
-                  ultimaJanela, picoLog, texturaLog, detector.fundo, detector.limiar,
-                  detector.armado, detector.pulso, detector.contagem,
-                  janelas, saturadas, maiorIntervalo, perdidas);
-    ultimoLog = agora;
-    picoLog = texturaLog = saturadas = janelas = 0;
-    maiorIntervalo = perdidas = 0;
-  }
-
-  if (estadoAtual != ESTADO_STANDBY && agora - tempoInicioExibicao >= TEMPO_EXIBICAO) {
-    estadoAtual = ESTADO_STANDBY;
-    Serial.println("[STANDBY] Retornando ao logo CLIMA INTERNO");
-  }
-  // Atualiza OLED a 10 Hz em vez de bloquear cada janela de áudio.
-  static unsigned long ultimaTela = 0;
-  if (agora - ultimaTela >= 100) {
-    ultimaTela = agora;
-    if (estadoAtual == ESTADO_TEMPERATURA) {
-      desenharTemperatura(temperaturaAtual);
-    } else if (estadoAtual == ESTADO_UMIDADE) {
-      desenharUmidade(umidadeAtual);
+  static wl_status_t ultimoStatusWifi = WL_IDLE_STATUS;
+  wl_status_t statusWifi = WiFi.status();
+  if ((statusWifi == WL_CONNECTED) != (ultimoStatusWifi == WL_CONNECTED)) {
+    if (statusWifi == WL_CONNECTED) {
+      Serial.printf("[WIFI] Conectado, IP %s\n", WiFi.localIP().toString().c_str());
     } else {
-      desenharStandby();
+      Serial.println("[WIFI] Conexão perdida; reconectando...");
     }
   }
+  ultimoStatusWifi = statusWifi;
 
-  // Leitura DHT periódica; a tarefa do microfone continua durante a chamada.
-  if (agora - tempoUltimoDHT >= 2000) {
+  if (agora - tempoUltimoDHT >= INTERVALO_DHT) {
     tempoUltimoDHT = agora;
-    float t = sensorDht.readTemperature();
-    float u = sensorDht.readHumidity();
-    if (!isnan(t)) temperaturaAtual = t;
-    if (!isnan(u)) umidadeAtual = u;
+    lerSensor();
+  }
+
+  enviarLeituraSinric();
+
+  static unsigned long ultimaTela = 0;
+  if (agora - ultimaTela >= INTERVALO_TELA) {
+    ultimaTela = agora;
+    desenharPainel();
   }
 }
