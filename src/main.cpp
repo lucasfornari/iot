@@ -11,6 +11,7 @@
 #include <Adafruit_SSD1306.h>
 #include <SinricPro.h>
 #include <SinricProTemperaturesensor.h>
+#include <SinricProSwitch.h>
 #include <Capabilities/RangeController.h>
 #include "credenciais.h"
 
@@ -26,6 +27,7 @@ class SensorUmidade : public SinricProDevice, public RangeController<SensorUmida
 #define PINO_SENSOR_DHT     13
 #define TIPO_SENSOR_DHT     DHT11
 #define PINO_I2C_SDA        21
+#define PINO_LED            25  // GPIO25 -> resistor -> LED (perna longa); perna curta -> GND
 #define PINO_I2C_SCL        22
 #define LARGURA_TELA_OLED   128
 #define ALTURA_TELA_OLED    64
@@ -62,6 +64,8 @@ bool wifiConfigurado = false;  // Pilha de rede (lwIP) só existe após WiFi.mod
 bool credenciaisSinricOk = false;
 bool umidadeSinricOk = false;  // Dispositivo de umidade configurado no .env
 int umidadeEnviadaRange = -1;
+bool ledSinricOk = false;  // Dispositivo "Switch" do LED configurado no .env
+bool ledAceso = false;
 bool sinricConectado = false;
 
 // ---------- Interface OLED bicolor ----------
@@ -116,16 +120,21 @@ void desenharPainel() {
   }
   desenharTextoCentralizado(texto, 22, 2);
 
-  if (isnan(umidadeAtual)) {
-    snprintf(texto, sizeof(texto), "Umidade: -- %%");
-  } else {
-    snprintf(texto, sizeof(texto), "Umidade: %.0f %%", umidadeAtual);
-  }
+  char umid[8];
+  if (isnan(umidadeAtual)) snprintf(umid, sizeof(umid), "--");
+  else snprintf(umid, sizeof(umid), "%.0f", umidadeAtual);
+  snprintf(texto, sizeof(texto), "Umid: %s%%  LED:%s", umid, ledAceso ? "ON" : "OFF");
   desenharTextoCentralizado(texto, 42, 1);
 
   snprintf(texto, sizeof(texto), "WiFi:%s  Alexa:%s", textoStatusWifi(), textoStatusAlexa());
   desenharTextoCentralizado(texto, 55, 1);
   telaOled.display();
+}
+
+// ---------- LED (Switch na Alexa) ----------
+void aplicarLed(bool aceso) {
+  ledAceso = aceso;
+  digitalWrite(PINO_LED, aceso ? HIGH : LOW);
 }
 
 // ---------- Wi-Fi ----------
@@ -189,6 +198,16 @@ void iniciarSinric() {
     });
     umidade.onAdjustRangeValue(SINRIC_INSTANCIA_UMIDADE, [](const String &, const String &, int &) {
       return false;
+    });
+  }
+
+  ledSinricOk = strlen(SINRIC_DEVICE_ID_LED) > 0;
+  if (ledSinricOk) {
+    SinricProSwitch &led = SinricPro[SINRIC_DEVICE_ID_LED];
+    led.onPowerState([](const String &, bool &estado) {
+      aplicarLed(estado);
+      Serial.printf("[LED] %s (Alexa/Sinric)\n", estado ? "Aceso" : "Apagado");
+      return true;
     });
   }
 
@@ -266,6 +285,9 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
+  pinMode(PINO_LED, OUTPUT);
+  aplicarLed(false);
+
   Wire.begin(PINO_I2C_SDA, PINO_I2C_SCL);
   Wire.setClock(400000);
   telaDisponivel = telaOled.begin(SSD1306_SWITCHCAPVCC, ENDERECO_TELA_OLED);
@@ -298,6 +320,18 @@ void loop() {
   if (credenciaisSinricOk && WiFi.status() == WL_CONNECTED) SinricPro.handle();
 
   unsigned long agora = millis();
+
+  // Teste local: envie 'v' pelo monitor serial para alternar o LED.
+  while (Serial.available()) {
+    if (Serial.read() == 'v') {
+      aplicarLed(!ledAceso);
+      Serial.printf("[LED] %s (serial)\n", ledAceso ? "Aceso" : "Apagado");
+      if (ledSinricOk && sinricConectado) {
+        SinricProSwitch &led = SinricPro[SINRIC_DEVICE_ID_LED];
+        led.sendPowerStateEvent(ledAceso);  // Mantém Alexa/app sincronizados
+      }
+    }
+  }
 
   static wl_status_t ultimoStatusWifi = WiFi.status();  // Evita log duplicado no 1º loop
   wl_status_t statusWifi = WiFi.status();

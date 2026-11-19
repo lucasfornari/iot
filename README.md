@@ -20,6 +20,8 @@ O controle por palmas com o microfone **MAX4466** foi arquivado em
 | **Sensor DHT11** | Dados (DATA / OUT) | **GPIO 13** | Sinal digital de temperatura e umidade |
 | | VCC | 3.3V ou 5V | Alimentação |
 | | GND | GND | Terra |
+| **LED** | Perna longa (+) | **GPIO 25** (via resistor 220 Ω–1 kΩ) | Controlado pela Alexa (Switch) |
+| | Perna curta (−) | GND | Terra |
 | **Display OLED 0.96"** | **SDA** | **GPIO 21** | Barramento de dados I2C |
 | *(SSD1306 / 128x64)* | **SCL / SCK** | **GPIO 22** | Clock I2C |
 | | VCC | 3.3V | Alimentação |
@@ -59,6 +61,12 @@ A Alexa não responde umidade do *Temperature Sensor*. Para isso:
    (ID da instância no código gerado pelo portal; padrão `rangeInstance1`).
 3. O firmware envia a umidade para esse dispositivo junto com a temperatura.
    O valor é somente leitura: ajustes vindos da Alexa são recusados.
+
+### LED pela Alexa (opcional)
+1. No portal, crie um dispositivo do tipo **Switch** (ex.: "luz azul").
+2. No `.env`, preencha `SINRIC_DEVICE_ID_LED`.
+3. *"Alexa, liga a luz azul"* acende o LED da GPIO25; o OLED mostra `LED:ON/OFF`.
+   Para testar sem a Alexa, envie `v` pelo `pio device monitor`.
 
 ### 3. Plataforma
 O SinricPro 5.x exige **Arduino core 3.x**. Por isso o `platformio.ini` usa a
